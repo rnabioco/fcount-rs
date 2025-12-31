@@ -1,0 +1,48 @@
+[package]
+name = "fcount-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jay Hesselberth <jay.hesselberth@gmail.com>"]
+description = "Ultrafast feature counting for RNA-seq data"
+license = "MIT"
+repository = "https://github.com/rnabioco/fcount-rs"
+keywords = ["bioinformatics", "rna-seq", "genomics", "feature-counts"]
+categories = ["science", "command-line-utilities"]
+
+[dependencies]
+# BAM/SAM parsing (pure Rust)
+noodles-bam = "0.68"
+noodles-sam = "0.65"
+noodles-bgzf = "0.33"
+noodles-core = "0.15"
+
+# GTF/GFF parsing (reuse rust-bio's battle-tested parser)
+bio = "2.0"
+bio-types = "1.0"
+
+# Parallelism
+rayon = "1.10"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Data structures
+rustc-hash = "2.0"
+smallvec = "1.13"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true

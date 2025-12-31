@@ -5,7 +5,6 @@ mod stats;
 mod worker;
 
 pub use counter::ThreadCounter;
-pub use overlap::Assignment;
 pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
 pub use stats::ReadCounters;
 
@@ -245,11 +244,9 @@ fn process_paired_read(
     };
 
     // Check for chimeric reads
-    if record.mate_chrom_id != record.chrom_id {
-        if !args.count_chimeric {
-            counter.stats.unassigned_chimeric += 1;
-            return;
-        }
+    if record.mate_chrom_id != record.chrom_id && !args.count_chimeric {
+        counter.stats.unassigned_chimeric += 1;
+        return;
     }
 
     // Try to find mate
@@ -385,7 +382,7 @@ fn process_bam_parallel(
     let result = crossbeam::scope(|scope| {
         // Spawn workers
         let worker_handles: Vec<_> = (0..num_workers)
-            .map(|id| {
+            .map(|_| {
                 let rx = rx.clone();
                 let ref_to_chrom = &ref_to_chrom;
                 let annotation = annotation;
@@ -394,7 +391,7 @@ fn process_bam_parallel(
                 scope.spawn(move |_| {
                     let ref_to_chrom_arc = Arc::new(ref_to_chrom.to_vec());
                     let args_arc = Arc::new(args.clone());
-                    let mut worker = Worker::new(id, count_size, ref_to_chrom_arc, args_arc);
+                    let mut worker = Worker::new(count_size, ref_to_chrom_arc, args_arc);
 
                     // Process batches until channel closes
                     while let Ok(batch) = rx.recv() {
@@ -501,19 +498,19 @@ fn process_bam_parallel_paired(
     count_size: usize,
 ) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
-    use crate::alignment::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
+    use crate::alignment::minimal_parser::MinimalRecord;
 
     // Open BAM reader with all available threads for decompression
     let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, args.threads)?;
     let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
 
-    // Number of worker threads
+    // All threads are workers
     let num_workers = args.threads.max(1);
 
-    // Create sharded mate tracker with 4x shards per worker to reduce contention
-    let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 4));
+    // Create sharded mate tracker with 8x shards per worker to reduce contention
+    let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 8));
 
-    // Channel for batch distribution - larger buffer to prevent worker starvation
+    // Large channel buffer for read-ahead
     let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
 
     // Use crossbeam scoped threads for safe borrowing
@@ -559,7 +556,7 @@ fn process_bam_parallel_paired(
             }
         }
 
-        // Close channel to signal workers to finish
+        // Close channel
         drop(tx);
 
         // Collect and merge results
@@ -631,7 +628,13 @@ fn process_paired_batch(
 
         // Parse record - need read name for mate tracking
         // Note: parse_bam_record expects data WITHOUT the 4-byte size prefix
-        if crate::alignment::minimal_parser::parse_bam_record(&data[data_start..data_end], record, true).is_err() {
+        if crate::alignment::minimal_parser::parse_bam_record(
+            &data[data_start..data_end],
+            record,
+            true,
+        )
+        .is_err()
+        {
             offset = data_end;
             continue;
         }
@@ -695,19 +698,16 @@ fn process_paired_batch(
         }
 
         // Check for chimeric reads
-        let mate_chrom_id = if record.mate_ref_id >= 0
-            && (record.mate_ref_id as usize) < ref_to_chrom.len()
-        {
-            ref_to_chrom[record.mate_ref_id as usize]
-        } else {
-            None
-        };
+        let mate_chrom_id =
+            if record.mate_ref_id >= 0 && (record.mate_ref_id as usize) < ref_to_chrom.len() {
+                ref_to_chrom[record.mate_ref_id as usize]
+            } else {
+                None
+            };
 
-        if mate_chrom_id != Some(chrom_id) {
-            if !args.count_chimeric {
-                counter.stats.unassigned_chimeric += 1;
-                continue;
-            }
+        if mate_chrom_id != Some(chrom_id) && !args.count_chimeric {
+            counter.stats.unassigned_chimeric += 1;
+            continue;
         }
 
         // Create deferred read for mate tracking
@@ -741,39 +741,41 @@ fn process_minimal_single_read(
 ) {
     counter.hit_buffer.clear();
 
+    let record_strand = if record.is_reverse() {
+        crate::annotation::Strand::Reverse
+    } else {
+        crate::annotation::Strand::Forward
+    };
+
     for interval in &record.intervals {
-        for (feat_idx, feature) in
-            annotation.find_overlapping(chrom_id, interval.start, interval.end)
-        {
-            // Check strand if stranded mode
-            let record_strand = if record.is_reverse() {
-                crate::annotation::Strand::Reverse
-            } else {
-                crate::annotation::Strand::Forward
-            };
+        // Use callback-based query to avoid allocation
+        annotation.query_overlapping(
+            chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
+                if !overlap::check_strand_with_strand(record_strand, feature, args) {
+                    return;
+                }
 
-            if !overlap::check_strand_with_strand(record_strand, feature, args) {
-                continue;
-            }
+                let overlap_len = if args.need_overlap_length() {
+                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                } else {
+                    1
+                };
 
-            // Calculate overlap if needed
-            let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-            } else {
-                1
-            };
+                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
+                {
+                    return;
+                }
 
-            // Check minimum overlap
-            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                continue;
-            }
-
-            counter.hit_buffer.push(overlap::FeatureHit {
-                feature_idx: feat_idx,
-                gene_id: feature.gene_id,
-                overlap_len,
-            });
-        }
+                counter.hit_buffer.push(overlap::FeatureHit {
+                    feature_idx: feat_idx,
+                    gene_id: feature.gene_id,
+                    overlap_len,
+                });
+            },
+        );
     }
 
     let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
@@ -803,53 +805,20 @@ fn process_minimal_fragment(
         crate::annotation::Strand::Forward
     };
 
-    // Hits from current record
+    // Hits from current record - use callback-based query
     for interval in &record.intervals {
-        for (feat_idx, feature) in
-            annotation.find_overlapping(chrom_id, interval.start, interval.end)
-        {
-            if !overlap::check_strand_paired_with_strands(record_strand, mate_strand, feature, args)
-            {
-                continue;
-            }
-
-            let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-                    + crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
-            } else {
-                1
-            };
-
-            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                continue;
-            }
-
-            counter.hit_buffer.push(overlap::FeatureHit {
-                feature_idx: feat_idx,
-                gene_id: feature.gene_id,
-                overlap_len,
-            });
-        }
-    }
-
-    // Hits from mate (if on same chromosome)
-    if mate.chrom_id == chrom_id {
-        for interval in &mate.intervals {
-            for (feat_idx, feature) in
-                annotation.find_overlapping(chrom_id, interval.start, interval.end)
-            {
-                // Skip if already counted
-                if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
-                    continue;
-                }
-
+        annotation.query_overlapping(
+            chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
                 if !overlap::check_strand_paired_with_strands(
                     record_strand,
                     mate_strand,
                     feature,
                     args,
                 ) {
-                    continue;
+                    return;
                 }
 
                 let overlap_len = if args.need_overlap_length() {
@@ -865,7 +834,7 @@ fn process_minimal_fragment(
 
                 if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
                 {
-                    continue;
+                    return;
                 }
 
                 counter.hit_buffer.push(overlap::FeatureHit {
@@ -873,7 +842,62 @@ fn process_minimal_fragment(
                     gene_id: feature.gene_id,
                     overlap_len,
                 });
-            }
+            },
+        );
+    }
+
+    // Hits from mate (if on same chromosome)
+    if mate.chrom_id == chrom_id {
+        for interval in &mate.intervals {
+            annotation.query_overlapping(
+                chrom_id,
+                interval.start,
+                interval.end,
+                |feat_idx, feature| {
+                    // Skip if already counted
+                    if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
+                        return;
+                    }
+
+                    if !overlap::check_strand_paired_with_strands(
+                        record_strand,
+                        mate_strand,
+                        feature,
+                        args,
+                    ) {
+                        return;
+                    }
+
+                    let overlap_len = if args.need_overlap_length() {
+                        crate::alignment::total_overlap(
+                            &record.intervals,
+                            feature.start,
+                            feature.end,
+                        ) + crate::alignment::total_overlap(
+                            &mate.intervals,
+                            feature.start,
+                            feature.end,
+                        )
+                    } else {
+                        1
+                    };
+
+                    if !overlap::check_overlap_thresholds(
+                        overlap_len,
+                        &record.intervals,
+                        feature,
+                        args,
+                    ) {
+                        return;
+                    }
+
+                    counter.hit_buffer.push(overlap::FeatureHit {
+                        feature_idx: feat_idx,
+                        gene_id: feature.gene_id,
+                        overlap_len,
+                    });
+                },
+            );
         }
     }
 
@@ -962,7 +986,10 @@ fn process_deferred_as_single(
 }
 
 /// Count reads using parallel processing for paired-end mode
-pub fn count_reads_parallel_paired(args: &Args, annotation: &AnnotationIndex) -> Result<CountResult> {
+pub fn count_reads_parallel_paired(
+    args: &Args,
+    annotation: &AnnotationIndex,
+) -> Result<CountResult> {
     let num_features = annotation.features.len();
     let num_genes = annotation.gene_names.len();
     let count_size = if args.feature_level {

@@ -1,7 +1,11 @@
 #!/bin/bash
 # Benchmark script for fcount-rs vs featureCounts
 #
-# Usage: ./benchmark.sh [--regenerate]
+# Usage: ./benchmark.sh [--regenerate] [--build]
+#
+# Options:
+#   --regenerate  Regenerate chr22 test files from full dataset
+#   --build       Force rebuild of release binary before benchmarking
 
 set -e
 
@@ -26,10 +30,19 @@ regenerate_tests() {
     echo "  BAM: $TEST_BAM ($(samtools view -c $TEST_BAM) reads)"
 }
 
-# Ensure binary is built
+# Build release binary
 build() {
     echo "Building release binary..."
     cargo build --release 2>&1 | grep -E "(Compiling|Finished|error)"
+}
+
+# Check binary exists
+check_binary() {
+    if [[ ! -x "$FCOUNT_RS" ]]; then
+        echo "Binary not found at $FCOUNT_RS"
+        echo "Run with --build flag or: cargo build --release"
+        exit 1
+    fi
 }
 
 # Run benchmarks
@@ -79,11 +92,16 @@ run_benchmarks() {
 
 # Main
 main() {
+    local do_build=false
+
     for arg in "$@"; do
         case $arg in
             --regenerate)
                 regenerate_tests
                 exit 0
+                ;;
+            --build)
+                do_build=true
                 ;;
         esac
     done
@@ -94,7 +112,13 @@ main() {
         regenerate_tests
     fi
 
-    build
+    # Build only if requested
+    if $do_build; then
+        build
+    else
+        check_binary
+    fi
+
     run_benchmarks "$TEST_GTF" "$TEST_BAM"
 }
 

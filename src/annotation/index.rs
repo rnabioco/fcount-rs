@@ -50,8 +50,7 @@ impl ChromIndex {
         // Convert to end-inclusive for coitrees
         let first = start as i32;
         let last = (end - 1) as i32;
-        self.tree
-            .query(first, last, |node| callback(node.metadata));
+        self.tree.query(first, last, |node| callback(node.metadata));
     }
 }
 

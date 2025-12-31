@@ -8,8 +8,7 @@ use std::sync::Arc;
 use crate::alignment::block_reader::RecordBatch;
 use crate::alignment::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
 use crate::alignment::total_overlap;
-use crate::alignment::Interval;
-use crate::annotation::{AnnotationIndex, Feature, Strand};
+use crate::annotation::{AnnotationIndex, Strand};
 use crate::cli::{Args, StrandMode};
 
 use super::overlap::{Assignment, FeatureHit};
@@ -20,8 +19,6 @@ const FRACTION_MULTIPLIER: i64 = 1_000_000;
 
 /// Worker context for processing BAM records
 pub struct Worker {
-    /// Worker ID (for debugging)
-    pub id: usize,
     /// Thread-local count table
     pub counts: Vec<i64>,
     /// Thread-local statistics
@@ -42,17 +39,11 @@ pub struct Worker {
 
 impl Worker {
     /// Create a new worker
-    pub fn new(
-        id: usize,
-        count_size: usize,
-        ref_to_chrom: Arc<Vec<Option<u16>>>,
-        args: Arc<Args>,
-    ) -> Self {
+    pub fn new(count_size: usize, ref_to_chrom: Arc<Vec<Option<u16>>>, args: Arc<Args>) -> Self {
         let use_fractional = args.fractional_counting;
         let feature_level = args.feature_level;
 
         Worker {
-            id,
             counts: vec![0i64; count_size],
             stats: ReadCounters::default(),
             hit_buffer: Vec::with_capacity(16),
@@ -151,95 +142,99 @@ impl Worker {
 
     /// Process a single-end record
     fn process_single_record(&mut self, chrom_id: u16, annotation: &AnnotationIndex) {
-        // Find overlapping features
+        // Find overlapping features using callback-based query (no allocation)
         self.hit_buffer.clear();
 
-        for interval in &self.record.intervals {
-            for (feat_idx, feature) in
-                annotation.find_overlapping(chrom_id, interval.start, interval.end)
-            {
-                // Check strand if stranded mode
-                if !self.check_strand(feature) {
-                    continue;
-                }
+        let is_reverse = self.record.is_reverse();
+        let need_overlap = self.args.need_overlap_length();
+        let min_overlap_bases = self.args.min_overlap_bases;
+        let min_overlap_fraction = self.args.min_overlap_fraction;
+        let min_feature_overlap_fraction = self.args.min_feature_overlap_fraction;
+        let strand_mode = self.args.strand_mode();
 
-                // Calculate overlap if needed
-                let overlap_len = if self.args.need_overlap_length() {
-                    total_overlap(&self.record.intervals, feature.start, feature.end)
-                } else {
-                    1
-                };
+        // Get read length once if needed
+        let read_len: u32 = if min_overlap_fraction > 0.0 {
+            self.record.intervals.iter().map(|i| i.len()).sum()
+        } else {
+            0
+        };
 
-                // Check minimum overlap
-                if !self.check_overlap_thresholds(overlap_len, feature) {
-                    continue;
-                }
+        // Process each interval
+        for i in 0..self.record.intervals.len() {
+            let interval = self.record.intervals[i];
 
-                self.hit_buffer.push(FeatureHit {
-                    feature_idx: feat_idx,
-                    gene_id: feature.gene_id,
-                    overlap_len,
-                });
-            }
+            annotation.query_overlapping(
+                chrom_id,
+                interval.start,
+                interval.end,
+                |feat_idx, feature| {
+                    // Check strand if stranded mode
+                    let strand_ok = match strand_mode {
+                        StrandMode::Unstranded => true,
+                        StrandMode::Stranded => {
+                            let read_strand = if is_reverse {
+                                Strand::Reverse
+                            } else {
+                                Strand::Forward
+                            };
+                            feature.strand == read_strand || feature.strand == Strand::Unknown
+                        }
+                        StrandMode::ReverselyStranded => {
+                            let read_strand = if is_reverse {
+                                Strand::Forward
+                            } else {
+                                Strand::Reverse
+                            };
+                            feature.strand == read_strand || feature.strand == Strand::Unknown
+                        }
+                    };
+                    if !strand_ok {
+                        return;
+                    }
+
+                    // Calculate overlap if needed
+                    let overlap_len = if need_overlap {
+                        total_overlap(&self.record.intervals, feature.start, feature.end)
+                    } else {
+                        1
+                    };
+
+                    // Check minimum overlap bases
+                    if overlap_len < min_overlap_bases {
+                        return;
+                    }
+
+                    // Check minimum overlap fraction
+                    if min_overlap_fraction > 0.0 && read_len > 0 {
+                        let frac = overlap_len as f32 / read_len as f32;
+                        if frac < min_overlap_fraction {
+                            return;
+                        }
+                    }
+
+                    // Check minimum feature overlap fraction
+                    if min_feature_overlap_fraction > 0.0 {
+                        let feature_len = feature.len();
+                        if feature_len > 0 {
+                            let frac = overlap_len as f32 / feature_len as f32;
+                            if frac < min_feature_overlap_fraction {
+                                return;
+                            }
+                        }
+                    }
+
+                    self.hit_buffer.push(FeatureHit {
+                        feature_idx: feat_idx,
+                        gene_id: feature.gene_id,
+                        overlap_len,
+                    });
+                },
+            );
         }
 
         // Assign read
         let assignment = self.resolve_assignment();
         self.apply_assignment(assignment);
-    }
-
-    /// Check strand compatibility for single-end reads
-    #[inline]
-    fn check_strand(&self, feature: &Feature) -> bool {
-        match self.args.strand_mode() {
-            StrandMode::Unstranded => true,
-            StrandMode::Stranded => {
-                let read_strand = if self.record.is_reverse() {
-                    Strand::Reverse
-                } else {
-                    Strand::Forward
-                };
-                feature.strand == read_strand || feature.strand == Strand::Unknown
-            }
-            StrandMode::ReverselyStranded => {
-                let read_strand = if self.record.is_reverse() {
-                    Strand::Forward
-                } else {
-                    Strand::Reverse
-                };
-                feature.strand == read_strand || feature.strand == Strand::Unknown
-            }
-        }
-    }
-
-    /// Check overlap thresholds
-    #[inline]
-    fn check_overlap_thresholds(&self, overlap_len: u32, feature: &Feature) -> bool {
-        if overlap_len < self.args.min_overlap_bases {
-            return false;
-        }
-
-        if self.args.min_overlap_fraction > 0.0 {
-            let read_len: u32 = self.record.intervals.iter().map(|i| i.len()).sum();
-            if read_len > 0 {
-                let frac = overlap_len as f32 / read_len as f32;
-                if frac < self.args.min_overlap_fraction {
-                    return false;
-                }
-            }
-        }
-
-        if self.args.min_feature_overlap_fraction > 0.0 {
-            let feature_len = feature.len();
-            if feature_len > 0 {
-                let frac = overlap_len as f32 / feature_len as f32;
-                if frac < self.args.min_feature_overlap_fraction {
-                    return false;
-                }
-            }
-        }
-
-        true
     }
 
     /// Resolve assignment from hits
@@ -360,14 +355,6 @@ impl Worker {
         } else {
             1
         }
-    }
-
-    /// Merge another worker's results into this one
-    pub fn merge(&mut self, other: &Worker) {
-        for (i, &count) in other.counts.iter().enumerate() {
-            self.counts[i] += count;
-        }
-        self.stats.merge(&other.stats);
     }
 
     /// Get final results

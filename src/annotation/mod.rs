@@ -4,7 +4,7 @@ mod gtf;
 mod index;
 
 pub use feature::{Feature, Strand};
-pub use index::{AnnotationIndex, ChromIndex};
+pub use index::AnnotationIndex;
 
 use crate::cli::Args;
 use anyhow::Result;

@@ -14,8 +14,9 @@ use std::path::Path;
 use super::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
 use crate::annotation::AnnotationIndex;
 
-/// Size of each batch of decompressed BAM data (target ~1MB per batch)
-const BATCH_TARGET_SIZE: usize = 1024 * 1024;
+/// Size of each batch of decompressed BAM data (target ~4MB per batch)
+/// Larger batches reduce channel overhead and improve cache efficiency
+const BATCH_TARGET_SIZE: usize = 4 * 1024 * 1024;
 
 /// A batch of decompressed BAM data ready for parallel parsing
 #[derive(Debug)]

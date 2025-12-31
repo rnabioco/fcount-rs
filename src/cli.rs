@@ -1,11 +1,13 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "fcount-rs")]
 #[command(author, version, about = "Ultrafast feature counting for RNA-seq data")]
-#[command(long_about = "A high-performance Rust alternative to featureCounts for counting reads \
-    that map to genomic features such as genes, exons, and transcripts.")]
+#[command(
+    long_about = "A high-performance Rust alternative to featureCounts for counting reads \
+    that map to genomic features such as genes, exons, and transcripts."
+)]
 pub struct Args {
     /// GTF/GFF annotation file
     #[arg(short = 'a', long = "annotation")]

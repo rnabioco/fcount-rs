@@ -1,4 +1,6 @@
+pub mod block_reader;
 mod cigar;
+pub mod minimal_parser;
 mod paired;
 mod reader;
 

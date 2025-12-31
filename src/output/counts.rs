@@ -41,22 +41,24 @@ fn write_gene_level(
     result: &CountResult,
     writer: &mut BufWriter<File>,
 ) -> Result<()> {
-    // For each gene, collect its features to determine coordinates
-    for (gene_idx, gene_name) in annotation.gene_names.iter().enumerate() {
-        // Find all features for this gene
-        let gene_features: Vec<_> = annotation
-            .features
-            .iter()
-            .filter(|f| f.gene_id as usize == gene_idx)
-            .collect();
+    // Pre-group features by gene_id - O(n) instead of O(n*m)
+    let mut gene_to_features: Vec<Vec<usize>> = vec![Vec::new(); annotation.gene_names.len()];
+    for (feat_idx, feature) in annotation.features.iter().enumerate() {
+        gene_to_features[feature.gene_id as usize].push(feat_idx);
+    }
 
-        if gene_features.is_empty() {
+    // Now iterate genes with pre-computed feature indices
+    for (gene_idx, gene_name) in annotation.gene_names.iter().enumerate() {
+        let feature_indices = &gene_to_features[gene_idx];
+        if feature_indices.is_empty() {
             continue;
         }
 
         // Collect chromosome(s)
-        let chrom_ids: std::collections::BTreeSet<_> =
-            gene_features.iter().map(|f| f.chrom_id).collect();
+        let chrom_ids: std::collections::BTreeSet<_> = feature_indices
+            .iter()
+            .map(|&idx| annotation.features[idx].chrom_id)
+            .collect();
         let chroms: Vec<_> = chrom_ids
             .iter()
             .filter_map(|&id| annotation.id_to_chrom.get(id as usize))
@@ -65,25 +67,31 @@ fn write_gene_level(
         let chrom_str = chroms.join(";");
 
         // Collect starts
-        let starts: Vec<_> = gene_features.iter().map(|f| f.start.to_string()).collect();
+        let starts: Vec<_> = feature_indices
+            .iter()
+            .map(|&idx| annotation.features[idx].start.to_string())
+            .collect();
         let starts_str = starts.join(";");
 
         // Collect ends
-        let ends: Vec<_> = gene_features.iter().map(|f| f.end.to_string()).collect();
+        let ends: Vec<_> = feature_indices
+            .iter()
+            .map(|&idx| annotation.features[idx].end.to_string())
+            .collect();
         let ends_str = ends.join(";");
 
-        // Strand
-        let strand = gene_features
-            .first()
-            .map(|f| match f.strand {
-                crate::annotation::Strand::Forward => "+",
-                crate::annotation::Strand::Reverse => "-",
-                crate::annotation::Strand::Unknown => ".",
-            })
-            .unwrap_or(".");
+        // Strand (from first feature)
+        let strand = match annotation.features[feature_indices[0]].strand {
+            crate::annotation::Strand::Forward => "+",
+            crate::annotation::Strand::Reverse => "-",
+            crate::annotation::Strand::Unknown => ".",
+        };
 
         // Length (sum of all feature lengths for this gene)
-        let length: u32 = gene_features.iter().map(|f| f.len()).sum();
+        let length: u32 = feature_indices
+            .iter()
+            .map(|&idx| annotation.features[idx].len())
+            .sum();
 
         // Count
         let count = result.counts.get(gene_idx).copied().unwrap_or(0);

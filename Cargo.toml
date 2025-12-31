@@ -13,7 +13,7 @@ categories = ["science", "command-line-utilities"]
 # BAM/SAM parsing (pure Rust)
 noodles-bam = "0.68"
 noodles-sam = "0.65"
-noodles-bgzf = "0.33"
+noodles-bgzf = { version = "0.33", features = ["libdeflate"] }
 noodles-core = "0.15"
 
 # GTF/GFF parsing (reuse rust-bio's battle-tested parser)
@@ -22,6 +22,7 @@ bio-types = "1.0"
 
 # Parallelism
 rayon = "1.10"
+crossbeam = "0.8"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }

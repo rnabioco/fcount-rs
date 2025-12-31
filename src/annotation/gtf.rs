@@ -5,9 +5,9 @@ use log::debug;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-use crate::cli::Args;
 use super::feature::{Feature, Strand};
 use super::index::AnnotationIndex;
+use crate::cli::Args;
 
 /// Load GTF/GFF file and build annotation index
 pub fn load_gtf(args: &Args) -> Result<AnnotationIndex> {

@@ -99,4 +99,12 @@ impl ThreadCounter {
             self.counts.iter().map(|&c| c as f64).collect()
         }
     }
+
+    /// Merge another counter's results into this one
+    pub fn merge(&mut self, other: &ThreadCounter) {
+        for (i, &count) in other.counts.iter().enumerate() {
+            self.counts[i] += count;
+        }
+        self.stats.merge(&other.stats);
+    }
 }

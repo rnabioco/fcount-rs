@@ -10,7 +10,7 @@
 set -e
 
 # Paths
-FCOUNT_RS="./target/release/fcount-rs"
+FCOUNT_RS="./target/release/fcount"
 TEST_GTF="/tmp/test_chr22.gtf"
 TEST_BAM="/tmp/test_chr22.bam"
 TEST_OUTPUT="/tmp/fcount_benchmark.txt"

@@ -95,6 +95,46 @@ pub fn check_strand_paired(
     }
 }
 
+/// Check strand compatibility using Strand enum directly (for parallel processing)
+pub fn check_strand_with_strand(read_strand: Strand, feature: &Feature, args: &Args) -> bool {
+    match args.strand_mode() {
+        StrandMode::Unstranded => true,
+        StrandMode::Stranded => {
+            feature.strand == read_strand || feature.strand == Strand::Unknown
+        }
+        StrandMode::ReverselyStranded => {
+            let expected_strand = match read_strand {
+                Strand::Forward => Strand::Reverse,
+                Strand::Reverse => Strand::Forward,
+                Strand::Unknown => Strand::Unknown,
+            };
+            feature.strand == expected_strand || feature.strand == Strand::Unknown
+        }
+    }
+}
+
+/// Check strand compatibility for paired-end using Strand enums directly
+pub fn check_strand_paired_with_strands(
+    _record_strand: Strand,
+    _mate_strand: Strand,
+    feature: &Feature,
+    args: &Args,
+) -> bool {
+    // For paired-end in parallel mode, we don't have first/second in pair info
+    // in a simple way, so we just check unstranded for now
+    // TODO: Pass first_in_pair flag to properly handle stranded paired-end
+    match args.strand_mode() {
+        StrandMode::Unstranded => true,
+        StrandMode::Stranded | StrandMode::ReverselyStranded => {
+            // For now, accept if feature strand is unknown or if either read matches
+            // This is a simplification - proper implementation needs first_in_pair info
+            feature.strand == Strand::Unknown
+                || feature.strand == _record_strand
+                || feature.strand == _mate_strand
+        }
+    }
+}
+
 /// Check if overlap meets threshold requirements
 pub fn check_overlap_thresholds(
     overlap_len: u32,

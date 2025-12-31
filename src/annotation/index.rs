@@ -1,42 +1,57 @@
 use anyhow::Result;
+use coitrees::{COITree, Interval, IntervalTree};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use super::feature::Feature;
 
-/// Bucket size for spatial index (128KB, matching C implementation)
-const BUCKET_SIZE: u32 = 131072;
-
-/// Per-chromosome spatial index using bucket-based lookup
-#[derive(Debug)]
+/// Per-chromosome spatial index using cache-oblivious interval tree
 pub struct ChromIndex {
-    /// Chromosome ID
-    pub chrom_id: u16,
-    /// Each bucket points to a range of feature indices: (start_idx, end_idx)
-    /// Bucket i covers positions [i * BUCKET_SIZE, (i+1) * BUCKET_SIZE)
-    pub buckets: Vec<(u32, u32)>,
-    /// Maximum feature end position in each bucket (for early termination)
-    pub bucket_max_end: Vec<u32>,
+    /// COITree for fast interval queries
+    /// Stores feature index as metadata
+    tree: COITree<u32, u32>,
+}
+
+impl std::fmt::Debug for ChromIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChromIndex")
+            .field("num_intervals", &self.tree.len())
+            .finish()
+    }
 }
 
 impl ChromIndex {
-    /// Find features that potentially overlap the query interval
-    /// Returns an iterator over feature indices
-    pub fn find_overlapping(&self, start: u32, end: u32) -> impl Iterator<Item = u32> + '_ {
-        let start_bucket = (start / BUCKET_SIZE) as usize;
-        let end_bucket = (end / BUCKET_SIZE) as usize;
+    /// Create a new ChromIndex from features
+    fn new(features: &[Feature], start_idx: usize) -> Self {
+        let intervals: Vec<Interval<u32>> = features
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                // coitrees uses i32 for coordinates (end-inclusive)
+                // GTF/BED coordinates are 1-based, end-exclusive, so subtract 1
+                let first = f.start as i32;
+                let last = (f.end - 1) as i32; // Convert to end-inclusive
+                let feat_idx = (start_idx + i) as u32;
+                Interval::new(first, last, feat_idx)
+            })
+            .collect();
 
-        let max_bucket = self.buckets.len().saturating_sub(1);
+        let tree: COITree<u32, u32> = COITree::new(&intervals);
+        ChromIndex { tree }
+    }
 
-        (start_bucket..=end_bucket.min(max_bucket)).flat_map(move |bucket_idx| {
-            // Early termination: if bucket's max end < query start, skip
-            if self.bucket_max_end.get(bucket_idx).copied().unwrap_or(0) < start {
-                return 0..0;
-            }
-
-            let (feat_start, feat_end) = self.buckets.get(bucket_idx).copied().unwrap_or((0, 0));
-            feat_start..feat_end
-        })
+    /// Find features that overlap the query interval
+    /// Calls the provided closure for each overlapping feature index
+    #[inline]
+    pub fn query<F>(&self, start: u32, end: u32, mut callback: F)
+    where
+        F: FnMut(u32),
+    {
+        // Convert to end-inclusive for coitrees
+        let first = start as i32;
+        let last = (end - 1) as i32;
+        self.tree
+            .query(first, last, |node| callback(node.metadata));
     }
 }
 
@@ -65,8 +80,7 @@ impl AnnotationIndex {
     ) -> Result<Self> {
         let num_chroms = id_to_chrom.len();
 
-        // Build chromosome boundaries in a single pass O(n) instead of O(m*n)
-        // Features are sorted by (chrom_id, start), so we can find boundaries efficiently
+        // Build chromosome boundaries in a single pass O(n)
         let mut chrom_boundaries: Vec<(usize, usize)> = vec![(0, 0); num_chroms];
 
         if !features.is_empty() {
@@ -76,86 +90,28 @@ impl AnnotationIndex {
             for (i, f) in features.iter().enumerate() {
                 let fchrom = f.chrom_id as usize;
                 if fchrom != current_chrom {
-                    // Close out the previous chromosome
                     chrom_boundaries[current_chrom] = (start_idx, i);
-                    // Handle any skipped chromosomes (with no features)
                     for skip_chrom in (current_chrom + 1)..fchrom {
-                        chrom_boundaries[skip_chrom] = (i, i); // Empty range
+                        chrom_boundaries[skip_chrom] = (i, i);
                     }
                     current_chrom = fchrom;
                     start_idx = i;
                 }
             }
-            // Close out the last chromosome
             chrom_boundaries[current_chrom] = (start_idx, features.len());
         }
 
-        // Build per-chromosome indices
-        let mut chrom_indices: Vec<ChromIndex> = Vec::with_capacity(num_chroms);
-
-        for chrom_id in 0..num_chroms as u16 {
-            // Get pre-computed boundaries O(1)
-            let (start_idx, end_idx) = chrom_boundaries[chrom_id as usize];
-
-            if start_idx >= end_idx {
-                // No features on this chromosome
-                chrom_indices.push(ChromIndex {
-                    chrom_id,
-                    buckets: vec![],
-                    bucket_max_end: vec![],
-                });
-                continue;
-            }
-
-            // Find max position to determine number of buckets
-            let max_pos = features[start_idx..end_idx]
-                .iter()
-                .map(|f| f.end)
-                .max()
-                .unwrap_or(0);
-
-            let num_buckets = (max_pos / BUCKET_SIZE + 1) as usize;
-
-            // Build buckets
-            let mut buckets: Vec<(u32, u32)> = vec![(0, 0); num_buckets];
-            let mut bucket_max_end: Vec<u32> = vec![0; num_buckets];
-
-            // Assign features to buckets based on their start position
-            // Features are already sorted by start, so we can do a single pass
-            let mut current_bucket = 0;
-            let mut bucket_start = start_idx as u32;
-
-            for (i, feature) in features[start_idx..end_idx].iter().enumerate() {
-                let feat_idx = start_idx + i;
-                let feature_bucket = (feature.start / BUCKET_SIZE) as usize;
-
-                // Close out previous buckets
-                while current_bucket < feature_bucket && current_bucket < num_buckets {
-                    buckets[current_bucket] = (bucket_start, feat_idx as u32);
-                    current_bucket += 1;
-                    bucket_start = feat_idx as u32;
+        // Build per-chromosome COITree indices
+        let chrom_indices: Vec<ChromIndex> = (0..num_chroms)
+            .map(|chrom_id| {
+                let (start_idx, end_idx) = chrom_boundaries[chrom_id];
+                if start_idx >= end_idx {
+                    ChromIndex::new(&[], 0)
+                } else {
+                    ChromIndex::new(&features[start_idx..end_idx], start_idx)
                 }
-
-                // Update max end for all buckets this feature could overlap
-                // A feature starting in bucket B could overlap buckets B through B + (len/BUCKET_SIZE)
-                let end_bucket = (feature.end / BUCKET_SIZE) as usize;
-                for b in feature_bucket..=end_bucket.min(num_buckets - 1) {
-                    bucket_max_end[b] = bucket_max_end[b].max(feature.end);
-                }
-            }
-
-            // Close out remaining buckets
-            while current_bucket < num_buckets {
-                buckets[current_bucket] = (bucket_start, end_idx as u32);
-                current_bucket += 1;
-            }
-
-            chrom_indices.push(ChromIndex {
-                chrom_id,
-                buckets,
-                bucket_max_end,
-            });
-        }
+            })
+            .collect();
 
         Ok(AnnotationIndex {
             chrom_to_id,
@@ -185,25 +141,36 @@ impl AnnotationIndex {
     }
 
     /// Find all features overlapping the given interval on a chromosome
+    /// Uses callback-based API for efficiency (avoids allocations)
+    #[inline]
+    pub fn query_overlapping<F>(&self, chrom_id: u16, start: u32, end: u32, mut callback: F)
+    where
+        F: FnMut(u32, &Feature),
+    {
+        if let Some(chrom_index) = self.chrom_indices.get(chrom_id as usize) {
+            chrom_index.query(start, end, |feat_idx| {
+                if let Some(feature) = self.features.get(feat_idx as usize) {
+                    callback(feat_idx, feature);
+                }
+            });
+        }
+    }
+
+    /// Find all features overlapping the given interval (iterator version)
+    /// Note: This allocates a Vec internally. Prefer query_overlapping for hot paths.
     pub fn find_overlapping(
         &self,
         chrom_id: u16,
         start: u32,
         end: u32,
     ) -> impl Iterator<Item = (u32, &Feature)> + '_ {
-        let chrom_index = self.chrom_indices.get(chrom_id as usize);
-
-        chrom_index
+        let mut results = Vec::new();
+        self.query_overlapping(chrom_id, start, end, |idx, feat| {
+            results.push((idx, feat as *const Feature));
+        });
+        results
             .into_iter()
-            .flat_map(move |idx| idx.find_overlapping(start, end))
-            .filter_map(move |feat_idx| {
-                let feature = self.features.get(feat_idx as usize)?;
-                if feature.overlaps(start, end) {
-                    Some((feat_idx, feature))
-                } else {
-                    None
-                }
-            })
+            .map(|(idx, ptr)| (idx, unsafe { &*ptr }))
     }
 }
 
@@ -271,6 +238,17 @@ mod tests {
         // Query that overlaps two features
         let hits: Vec<_> = index.find_overlapping(0, 180, 320).collect();
         assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn test_query_overlapping() {
+        let index = make_test_index();
+
+        let mut count = 0;
+        index.query_overlapping(0, 150, 180, |_idx, _feat| {
+            count += 1;
+        });
+        assert_eq!(count, 1);
     }
 
     #[test]

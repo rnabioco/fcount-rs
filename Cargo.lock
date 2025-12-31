@@ -448,6 +448,7 @@ dependencies = [
  "crossbeam",
  "env_logger",
  "log",
+ "memchr",
  "noodles-bam",
  "noodles-bgzf",
  "noodles-core",

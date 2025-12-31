@@ -49,3 +49,6 @@ panic = "abort"
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6.1"

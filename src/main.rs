@@ -3,6 +3,13 @@ use clap::Parser;
 use log::info;
 use std::time::Instant;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 mod alignment;
 mod annotation;
 mod cli;

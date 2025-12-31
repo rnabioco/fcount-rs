@@ -90,9 +90,8 @@ impl AnnotationIndex {
                 let fchrom = f.chrom_id as usize;
                 if fchrom != current_chrom {
                     chrom_boundaries[current_chrom] = (start_idx, i);
-                    for skip_chrom in (current_chrom + 1)..fchrom {
-                        chrom_boundaries[skip_chrom] = (i, i);
-                    }
+                    // Fill gaps for chromosomes with no features
+                    chrom_boundaries[(current_chrom + 1)..fchrom].fill((i, i));
                     current_chrom = fchrom;
                     start_idx = i;
                 }

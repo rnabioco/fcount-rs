@@ -385,8 +385,6 @@ fn process_bam_parallel(
             .map(|_| {
                 let rx = rx.clone();
                 let ref_to_chrom = &ref_to_chrom;
-                let annotation = annotation;
-                let args = args;
 
                 scope.spawn(move |_| {
                     let ref_to_chrom_arc = Arc::new(ref_to_chrom.to_vec());
@@ -517,11 +515,9 @@ fn process_bam_parallel_paired(
     let result = crossbeam::scope(|scope| {
         // Spawn workers
         let worker_handles: Vec<_> = (0..num_workers)
-            .map(|_worker_id| {
+            .map(|_| {
                 let rx = rx.clone();
                 let ref_to_chrom = &ref_to_chrom;
-                let annotation = annotation;
-                let args = args;
                 let mate_tracker = Arc::clone(&mate_tracker);
 
                 scope.spawn(move |_| {

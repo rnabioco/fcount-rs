@@ -1,5 +1,5 @@
-pub mod annotation;
 pub mod alignment;
+pub mod annotation;
+pub mod cli;
 pub mod counting;
 pub mod output;
-pub mod cli;

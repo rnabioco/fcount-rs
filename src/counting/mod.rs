@@ -1,19 +1,24 @@
 mod counter;
 mod overlap;
 mod stats;
+mod worker;
 
 pub use counter::ThreadCounter;
 pub use overlap::Assignment;
 pub use stats::ReadCounters;
 
 use anyhow::Result;
+use crossbeam::channel;
 use log::{debug, info};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
+use crate::alignment::block_reader::BamBlockReader;
 use crate::alignment::{AlignmentReader, AlignmentRecord, MateTracker, PendingMate};
 use crate::annotation::AnnotationIndex;
 use crate::cli::Args;
+use worker::Worker;
 
 /// Result of counting reads across all BAM files
 pub struct CountResult {
@@ -90,7 +95,8 @@ fn process_bam_file(
     annotation: &AnnotationIndex,
     count_size: usize,
 ) -> Result<(Vec<i64>, ReadCounters)> {
-    let mut reader = AlignmentReader::open(bam_path)?;
+    // Use open_with_annotation for pre-computed ref_id → chrom_id mapping
+    let mut reader = AlignmentReader::open_with_annotation(bam_path, args.threads, annotation)?;
     let mut counter = ThreadCounter::new(count_size, args);
     let mut mate_tracker = if args.paired_end {
         Some(MateTracker::new(100_000))
@@ -172,7 +178,9 @@ fn process_single_read(
     // Find overlapping features
     counter.hit_buffer.clear();
     for interval in &record.intervals {
-        for (feat_idx, feature) in annotation.find_overlapping(chrom_id, interval.start, interval.end) {
+        for (feat_idx, feature) in
+            annotation.find_overlapping(chrom_id, interval.start, interval.end)
+        {
             // Check strand if stranded mode
             if !overlap::check_strand(record, feature, args) {
                 continue;
@@ -180,22 +188,13 @@ fn process_single_read(
 
             // Calculate overlap if needed
             let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(
-                    &record.intervals,
-                    feature.start,
-                    feature.end,
-                )
+                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
             } else {
                 1
             };
 
             // Check minimum overlap
-            if !overlap::check_overlap_thresholds(
-                overlap_len,
-                &record.intervals,
-                feature,
-                args,
-            ) {
+            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
                 continue;
             }
 
@@ -289,31 +288,21 @@ fn process_fragment(
 
     // Hits from current record
     for interval in &record.intervals {
-        for (feat_idx, feature) in annotation.find_overlapping(chrom_id, interval.start, interval.end) {
+        for (feat_idx, feature) in
+            annotation.find_overlapping(chrom_id, interval.start, interval.end)
+        {
             if !overlap::check_strand_paired(record, mate, feature, args) {
                 continue;
             }
 
             let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(
-                    &record.intervals,
-                    feature.start,
-                    feature.end,
-                ) + crate::alignment::total_overlap(
-                    &mate.intervals,
-                    feature.start,
-                    feature.end,
-                )
+                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                    + crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
             } else {
                 1
             };
 
-            if !overlap::check_overlap_thresholds(
-                overlap_len,
-                &record.intervals,
-                feature,
-                args,
-            ) {
+            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
                 continue;
             }
 
@@ -328,7 +317,9 @@ fn process_fragment(
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
         for interval in &mate.intervals {
-            for (feat_idx, feature) in annotation.find_overlapping(chrom_id, interval.start, interval.end) {
+            for (feat_idx, feature) in
+                annotation.find_overlapping(chrom_id, interval.start, interval.end)
+            {
                 // Skip if already counted
                 if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
                     continue;
@@ -339,25 +330,18 @@ fn process_fragment(
                 }
 
                 let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(
-                        &record.intervals,
-                        feature.start,
-                        feature.end,
-                    ) + crate::alignment::total_overlap(
-                        &mate.intervals,
-                        feature.start,
-                        feature.end,
-                    )
+                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                        + crate::alignment::total_overlap(
+                            &mate.intervals,
+                            feature.start,
+                            feature.end,
+                        )
                 } else {
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(
-                    overlap_len,
-                    &record.intervals,
-                    feature,
-                    args,
-                ) {
+                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
+                {
                     continue;
                 }
 
@@ -373,4 +357,135 @@ fn process_fragment(
     // Assign fragment
     let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
     counter.apply_assignment(assignment, record.nh.max(mate.nh), args);
+}
+
+/// Process a single BAM file using parallel producer-consumer pattern
+/// Uses crossbeam scoped threads for safe borrowing
+fn process_bam_parallel(
+    bam_path: &std::path::Path,
+    args: &Args,
+    annotation: &AnnotationIndex,
+    count_size: usize,
+) -> Result<(Vec<i64>, ReadCounters)> {
+    use crate::alignment::block_reader::RecordBatch;
+
+    // Open BAM reader
+    let mut reader = BamBlockReader::open(bam_path, annotation)?;
+    let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
+
+    // Number of worker threads
+    let num_workers = args.threads.max(1);
+
+    // Channel for batch distribution (bounded to limit memory usage)
+    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 2);
+
+    // Use crossbeam scoped threads for safe borrowing
+    let result = crossbeam::scope(|scope| {
+        // Spawn workers
+        let worker_handles: Vec<_> = (0..num_workers)
+            .map(|id| {
+                let rx = rx.clone();
+                let ref_to_chrom = &ref_to_chrom;
+                let annotation = annotation;
+                let args = args;
+
+                scope.spawn(move |_| {
+                    let ref_to_chrom_arc = Arc::new(ref_to_chrom.to_vec());
+                    let args_arc = Arc::new(args.clone());
+                    let mut worker = Worker::new(id, count_size, ref_to_chrom_arc, args_arc);
+
+                    // Process batches until channel closes
+                    while let Ok(batch) = rx.recv() {
+                        worker.process_batch(&batch, annotation);
+                    }
+
+                    worker.into_results()
+                })
+            })
+            .collect();
+
+        // Drop extra receiver so channel closes when producer is done
+        drop(rx);
+
+        // Producer: read batches and send to workers
+        while let Some(batch) = reader.read_batch().expect("Failed to read batch") {
+            if tx.send(batch).is_err() {
+                break; // Workers gone
+            }
+        }
+
+        // Close channel to signal workers to finish
+        drop(tx);
+
+        // Collect and merge results
+        let mut final_counts = vec![0i64; count_size];
+        let mut final_stats = ReadCounters::default();
+
+        for handle in worker_handles {
+            let (counts, stats) = handle.join().expect("Worker thread panicked");
+            for (i, &count) in counts.iter().enumerate() {
+                final_counts[i] += count;
+            }
+            final_stats.merge(&stats);
+        }
+
+        (final_counts, final_stats)
+    });
+
+    result.map_err(|_| anyhow::anyhow!("Scoped thread panicked"))
+}
+
+/// Count reads using parallel processing (for single-end mode only for now)
+pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result<CountResult> {
+    let num_features = annotation.features.len();
+    let num_genes = annotation.gene_names.len();
+    let count_size = if args.feature_level {
+        num_features
+    } else {
+        num_genes
+    };
+
+    // Process each BAM file
+    let progress = AtomicUsize::new(0);
+
+    let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
+        .bam_files
+        .iter()
+        .map(|bam_path| {
+            let result = process_bam_parallel(bam_path, args, annotation, count_size);
+
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            info!(
+                "Processed {}/{} BAM files: {}",
+                done,
+                args.bam_files.len(),
+                bam_path.display()
+            );
+
+            result
+        })
+        .collect();
+
+    // Merge results
+    let mut final_counts = vec![0i64; count_size];
+    let mut final_stats = ReadCounters::default();
+
+    for result in results {
+        let (counts, stats) = result?;
+        for (i, count) in counts.into_iter().enumerate() {
+            final_counts[i] += count;
+        }
+        final_stats.merge(&stats);
+    }
+
+    debug!(
+        "Total: {} assigned, {} unassigned",
+        final_stats.assigned,
+        final_stats.total_unassigned()
+    );
+
+    Ok(CountResult {
+        counts: final_counts,
+        stats: final_stats,
+    })
 }

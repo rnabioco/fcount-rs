@@ -138,10 +138,14 @@ mod tests {
     fn test_mate_tracking() {
         let mut tracker = MateTracker::new(1000);
 
-        let intervals1: SmallVec<[Interval; 4]> =
-            smallvec::smallvec![Interval { start: 100, end: 200 }];
-        let intervals2: SmallVec<[Interval; 4]> =
-            smallvec::smallvec![Interval { start: 300, end: 400 }];
+        let intervals1: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+            start: 100,
+            end: 200
+        }];
+        let intervals2: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+            start: 300,
+            end: 400
+        }];
 
         // Add first mate
         let result = tracker.add_mate(b"read1", 0, 100, intervals1.clone(), 0x41, 60, 1);
@@ -162,8 +166,10 @@ mod tests {
     fn test_different_reads() {
         let mut tracker = MateTracker::new(1000);
 
-        let intervals: SmallVec<[Interval; 4]> =
-            smallvec::smallvec![Interval { start: 100, end: 200 }];
+        let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+            start: 100,
+            end: 200
+        }];
 
         // Add mates from different reads
         tracker.add_mate(b"read1", 0, 100, intervals.clone(), 0x41, 60, 1);

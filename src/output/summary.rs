@@ -16,10 +16,7 @@ pub fn write_summary(args: &Args, result: &CountResult) -> Result<()> {
     let mut writer = BufWriter::new(file);
 
     // Write header
-    writeln!(
-        writer,
-        "Status\tCount\tPercentage"
-    )?;
+    writeln!(writer, "Status\tCount\tPercentage")?;
 
     let stats = &result.stats;
     let total = stats.total() as f64;
@@ -36,18 +33,58 @@ pub fn write_summary(args: &Args, result: &CountResult) -> Result<()> {
     };
 
     write_row(&mut writer, "Assigned", stats.assigned)?;
-    write_row(&mut writer, "Unassigned_Unmapped", stats.unassigned_unmapped)?;
+    write_row(
+        &mut writer,
+        "Unassigned_Unmapped",
+        stats.unassigned_unmapped,
+    )?;
     write_row(&mut writer, "Unassigned_Read_Type", 0)?; // Not used
-    write_row(&mut writer, "Unassigned_Singleton", stats.unassigned_singleton)?;
-    write_row(&mut writer, "Unassigned_MappingQuality", stats.unassigned_mapping_quality)?;
+    write_row(
+        &mut writer,
+        "Unassigned_Singleton",
+        stats.unassigned_singleton,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_MappingQuality",
+        stats.unassigned_mapping_quality,
+    )?;
     write_row(&mut writer, "Unassigned_Chimera", stats.unassigned_chimeric)?;
-    write_row(&mut writer, "Unassigned_FragmentLength", stats.unassigned_fragment_length)?;
-    write_row(&mut writer, "Unassigned_Duplicate", stats.unassigned_duplicate)?;
-    write_row(&mut writer, "Unassigned_MultiMapping", stats.unassigned_multimapping)?;
-    write_row(&mut writer, "Unassigned_Secondary", stats.unassigned_secondary)?;
-    write_row(&mut writer, "Unassigned_NoFeatures", stats.unassigned_no_features)?;
-    write_row(&mut writer, "Unassigned_Overlapping_Length", stats.unassigned_overlap_length)?;
-    write_row(&mut writer, "Unassigned_Ambiguity", stats.unassigned_ambiguous)?;
+    write_row(
+        &mut writer,
+        "Unassigned_FragmentLength",
+        stats.unassigned_fragment_length,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_Duplicate",
+        stats.unassigned_duplicate,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_MultiMapping",
+        stats.unassigned_multimapping,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_Secondary",
+        stats.unassigned_secondary,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_NoFeatures",
+        stats.unassigned_no_features,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_Overlapping_Length",
+        stats.unassigned_overlap_length,
+    )?;
+    write_row(
+        &mut writer,
+        "Unassigned_Ambiguity",
+        stats.unassigned_ambiguous,
+    )?;
 
     writer.flush()?;
 
@@ -56,10 +93,7 @@ pub fn write_summary(args: &Args, result: &CountResult) -> Result<()> {
         eprintln!();
         eprintln!("=== Summary ===");
         eprintln!("{}", stats);
-        eprintln!(
-            "Assignment rate: {:.1}%",
-            stats.assignment_rate() * 100.0
-        );
+        eprintln!("Assignment rate: {:.1}%", stats.assignment_rate() * 100.0);
     }
 
     Ok(())

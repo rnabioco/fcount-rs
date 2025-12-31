@@ -5,11 +5,11 @@ use noodles_sam as sam;
 use noodles_sam::alignment::record::Cigar;
 use smallvec::SmallVec;
 use std::fs::File;
-use std::io::BufReader;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
-use crate::annotation::AnnotationIndex;
 use super::cigar::Interval;
+use crate::annotation::AnnotationIndex;
 
 /// SAM flags for read filtering
 #[allow(dead_code)]
@@ -112,43 +112,99 @@ impl AlignmentRecord {
 pub struct AlignmentReader {
     inner: ReaderInner,
     header: sam::Header,
+    /// Pre-computed mapping from BAM ref_id → annotation chrom_id
+    /// This avoids HashMap lookups and string conversions per record
+    ref_to_chrom: Vec<Option<u16>>,
 }
 
 enum ReaderInner {
-    Bam(bam::io::Reader<bgzf::Reader<BufReader<File>>>),
-    Sam(sam::io::Reader<BufReader<File>>),
+    Bam(bam::io::Reader<bgzf::MultithreadedReader<File>>),
+    Sam(sam::io::Reader<std::io::BufReader<File>>),
 }
 
 impl AlignmentReader {
-    /// Open a BAM or SAM file
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open alignment file: {}", path.display()))?;
-        let _reader = BufReader::new(file);
-
-        // Check if it's a BAM file by trying to read BGZF header
+    /// Open a BAM or SAM file with multi-threaded BGZF decompression
+    /// Pre-computes ref_id → chrom_id mapping for fast lookups
+    pub fn open_with_annotation(
+        path: &Path,
+        threads: usize,
+        annotation: &AnnotationIndex,
+    ) -> Result<Self> {
+        // Check if it's a BAM file by extension
         let is_bam = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase() == "bam")
             .unwrap_or(false);
 
         if is_bam {
-            let file = File::open(path)?;
-            let mut bam_reader = bam::io::Reader::new(BufReader::new(file));
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open BAM file: {}", path.display()))?;
+
+            // Use multi-threaded BGZF reader for parallel decompression
+            let worker_count =
+                NonZeroUsize::new(threads.max(1)).expect("thread count must be positive");
+            let bgzf_reader = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+            let mut bam_reader = bam::io::Reader::from(bgzf_reader);
+            let header = bam_reader.read_header()?;
+
+            // Pre-compute ref_id → chrom_id mapping
+            let ref_to_chrom = build_ref_to_chrom_mapping(&header, annotation);
+
+            Ok(AlignmentReader {
+                inner: ReaderInner::Bam(bam_reader),
+                header,
+                ref_to_chrom,
+            })
+        } else {
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open SAM file: {}", path.display()))?;
+            let mut sam_reader = sam::io::Reader::new(std::io::BufReader::new(file));
+            let header = sam_reader.read_header()?;
+
+            // Pre-compute ref_id → chrom_id mapping
+            let ref_to_chrom = build_ref_to_chrom_mapping(&header, annotation);
+
+            Ok(AlignmentReader {
+                inner: ReaderInner::Sam(sam_reader),
+                header,
+                ref_to_chrom,
+            })
+        }
+    }
+
+    /// Legacy open without annotation (for backwards compatibility)
+    pub fn open(path: &Path, threads: usize) -> Result<Self> {
+        // Check if it's a BAM file by extension
+        let is_bam = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase() == "bam")
+            .unwrap_or(false);
+
+        if is_bam {
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open BAM file: {}", path.display()))?;
+
+            let worker_count =
+                NonZeroUsize::new(threads.max(1)).expect("thread count must be positive");
+            let bgzf_reader = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+            let mut bam_reader = bam::io::Reader::from(bgzf_reader);
             let header = bam_reader.read_header()?;
 
             Ok(AlignmentReader {
                 inner: ReaderInner::Bam(bam_reader),
                 header,
+                ref_to_chrom: Vec::new(),
             })
         } else {
-            let file = File::open(path)?;
-            let mut sam_reader = sam::io::Reader::new(BufReader::new(file));
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open SAM file: {}", path.display()))?;
+            let mut sam_reader = sam::io::Reader::new(std::io::BufReader::new(file));
             let header = sam_reader.read_header()?;
 
             Ok(AlignmentReader {
                 inner: ReaderInner::Sam(sam_reader),
                 header,
+                ref_to_chrom: Vec::new(),
             })
         }
     }
@@ -158,13 +214,29 @@ impl AlignmentReader {
         &self.header
     }
 
-    /// Iterate over records
+    /// Iterate over records with fast chrom_id lookup
     pub fn records(&mut self) -> RecordIter<'_> {
         RecordIter {
             reader: self,
             record_buf: sam::alignment::RecordBuf::default(),
         }
     }
+}
+
+/// Build ref_id → chrom_id mapping from BAM header
+fn build_ref_to_chrom_mapping(
+    header: &sam::Header,
+    annotation: &AnnotationIndex,
+) -> Vec<Option<u16>> {
+    header
+        .reference_sequences()
+        .iter()
+        .map(|(name, _)| {
+            std::str::from_utf8(name.as_ref())
+                .ok()
+                .and_then(|name_str| annotation.get_chrom_id(name_str))
+        })
+        .collect()
 }
 
 pub struct RecordIter<'a> {
@@ -175,9 +247,10 @@ pub struct RecordIter<'a> {
 impl<'a> RecordIter<'a> {
     /// Read next record into the provided AlignmentRecord
     /// Returns Ok(true) if a record was read, Ok(false) at EOF
+    /// Uses pre-computed ref_id → chrom_id mapping for fast lookup
     pub fn read_record(
         &mut self,
-        annotation: &AnnotationIndex,
+        _annotation: &AnnotationIndex, // Kept for API compatibility
         out: &mut AlignmentRecord,
     ) -> Result<bool> {
         let bytes_read = match &mut self.reader.inner {
@@ -193,30 +266,18 @@ impl<'a> RecordIter<'a> {
             return Ok(false);
         }
 
-        // Extract fields from record_buf
-        out.read_name = self
-            .record_buf
-            .name()
-            .map(|n| {
-                let bytes: &[u8] = n.as_ref();
-                bytes.to_vec()
-            })
-            .unwrap_or_default();
+        // Extract fields from record_buf (reuse buffer to avoid allocation)
+        out.read_name.clear();
+        if let Some(name) = self.record_buf.name() {
+            out.read_name.extend_from_slice(name.as_ref());
+        }
         out.flags = self.record_buf.flags().bits();
 
-        // Get reference sequence name and look up in annotation
+        // Use pre-computed ref_id → chrom_id mapping (fast array lookup instead of HashMap)
         out.chrom_id = self
             .record_buf
             .reference_sequence_id()
-            .and_then(|id| {
-                self.reader
-                    .header
-                    .reference_sequences()
-                    .get_index(id)
-                    .map(|(name, _)| std::str::from_utf8(name.as_ref()).ok())
-            })
-            .flatten()
-            .and_then(|name| annotation.get_chrom_id(name));
+            .and_then(|id| self.reader.ref_to_chrom.get(id).copied().flatten());
 
         // Position (convert to 1-based)
         out.start = self
@@ -259,19 +320,11 @@ impl<'a> RecordIter<'a> {
             })
             .unwrap_or(1);
 
-        // Mate info
+        // Mate info (also uses pre-computed mapping)
         out.mate_chrom_id = self
             .record_buf
             .mate_reference_sequence_id()
-            .and_then(|id| {
-                self.reader
-                    .header
-                    .reference_sequences()
-                    .get_index(id)
-                    .map(|(name, _)| std::str::from_utf8(name.as_ref()).ok())
-            })
-            .flatten()
-            .and_then(|name| annotation.get_chrom_id(name));
+            .and_then(|id| self.reader.ref_to_chrom.get(id).copied().flatten());
 
         out.mate_start = self
             .record_buf

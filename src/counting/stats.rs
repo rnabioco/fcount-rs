@@ -78,17 +78,61 @@ impl ReadCounters {
 impl std::fmt::Display for ReadCounters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Assigned:                    {}", self.assigned)?;
-        writeln!(f, "Unassigned_Unmapped:         {}", self.unassigned_unmapped)?;
-        writeln!(f, "Unassigned_Singleton:        {}", self.unassigned_singleton)?;
-        writeln!(f, "Unassigned_MappingQuality:   {}", self.unassigned_mapping_quality)?;
-        writeln!(f, "Unassigned_Chimera:          {}", self.unassigned_chimeric)?;
-        writeln!(f, "Unassigned_FragmentLength:   {}", self.unassigned_fragment_length)?;
-        writeln!(f, "Unassigned_Duplicate:        {}", self.unassigned_duplicate)?;
-        writeln!(f, "Unassigned_MultiMapping:     {}", self.unassigned_multimapping)?;
-        writeln!(f, "Unassigned_Secondary:        {}", self.unassigned_secondary)?;
-        writeln!(f, "Unassigned_NoFeatures:       {}", self.unassigned_no_features)?;
-        writeln!(f, "Unassigned_OverlapLength:    {}", self.unassigned_overlap_length)?;
-        writeln!(f, "Unassigned_Ambiguity:        {}", self.unassigned_ambiguous)?;
+        writeln!(
+            f,
+            "Unassigned_Unmapped:         {}",
+            self.unassigned_unmapped
+        )?;
+        writeln!(
+            f,
+            "Unassigned_Singleton:        {}",
+            self.unassigned_singleton
+        )?;
+        writeln!(
+            f,
+            "Unassigned_MappingQuality:   {}",
+            self.unassigned_mapping_quality
+        )?;
+        writeln!(
+            f,
+            "Unassigned_Chimera:          {}",
+            self.unassigned_chimeric
+        )?;
+        writeln!(
+            f,
+            "Unassigned_FragmentLength:   {}",
+            self.unassigned_fragment_length
+        )?;
+        writeln!(
+            f,
+            "Unassigned_Duplicate:        {}",
+            self.unassigned_duplicate
+        )?;
+        writeln!(
+            f,
+            "Unassigned_MultiMapping:     {}",
+            self.unassigned_multimapping
+        )?;
+        writeln!(
+            f,
+            "Unassigned_Secondary:        {}",
+            self.unassigned_secondary
+        )?;
+        writeln!(
+            f,
+            "Unassigned_NoFeatures:       {}",
+            self.unassigned_no_features
+        )?;
+        writeln!(
+            f,
+            "Unassigned_OverlapLength:    {}",
+            self.unassigned_overlap_length
+        )?;
+        writeln!(
+            f,
+            "Unassigned_Ambiguity:        {}",
+            self.unassigned_ambiguous
+        )?;
         Ok(())
     }
 }

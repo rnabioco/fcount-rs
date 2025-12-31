@@ -71,6 +71,7 @@ impl MateTracker {
     ///
     /// If the mate's pair is already pending, returns Some(pending_mate)
     /// Otherwise, stores this mate and returns None
+    #[allow(clippy::too_many_arguments)]
     pub fn add_mate(
         &mut self,
         read_name: &[u8],

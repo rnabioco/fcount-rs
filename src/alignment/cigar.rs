@@ -50,7 +50,7 @@ impl Interval {
 /// * `cigar` - Iterator over CIGAR operations from noodles
 /// * `start_pos` - 1-based start position of the alignment
 /// * `out` - Output buffer for intervals (will be cleared first)
-pub fn parse_cigar_intervals<'a, I>(cigar: I, start_pos: u32, out: &mut SmallVec<[Interval; 4]>)
+pub fn parse_cigar_intervals<I>(cigar: I, start_pos: u32, out: &mut SmallVec<[Interval; 4]>)
 where
     I: Iterator<Item = std::io::Result<noodles_sam::alignment::record::cigar::Op>>,
 {

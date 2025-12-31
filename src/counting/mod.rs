@@ -1,10 +1,12 @@
 mod counter;
 mod overlap;
+mod sharded_mate_tracker;
 mod stats;
 mod worker;
 
 pub use counter::ThreadCounter;
 pub use overlap::Assignment;
+pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
 pub use stats::ReadCounters;
 
 use anyhow::Result;
@@ -480,6 +482,530 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
 
     debug!(
         "Total: {} assigned, {} unassigned",
+        final_stats.assigned,
+        final_stats.total_unassigned()
+    );
+
+    Ok(CountResult {
+        counts: final_counts,
+        stats: final_stats,
+    })
+}
+
+/// Process a single BAM file using parallel producer-consumer pattern for paired-end reads
+/// Uses a sharded mate tracker for concurrent mate matching
+fn process_bam_parallel_paired(
+    bam_path: &std::path::Path,
+    args: &Args,
+    annotation: &AnnotationIndex,
+    count_size: usize,
+) -> Result<(Vec<i64>, ReadCounters)> {
+    use crate::alignment::block_reader::RecordBatch;
+    use crate::alignment::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
+
+    // Open BAM reader
+    let mut reader = BamBlockReader::open(bam_path, annotation)?;
+    let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
+
+    // Number of worker threads
+    let num_workers = args.threads.max(1);
+
+    // Create sharded mate tracker with 4x shards per worker to reduce contention
+    let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 4));
+
+    // Channel for batch distribution (bounded to limit memory usage)
+    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 2);
+
+    // Use crossbeam scoped threads for safe borrowing
+    let result = crossbeam::scope(|scope| {
+        // Spawn workers
+        let worker_handles: Vec<_> = (0..num_workers)
+            .map(|_worker_id| {
+                let rx = rx.clone();
+                let ref_to_chrom = &ref_to_chrom;
+                let annotation = annotation;
+                let args = args;
+                let mate_tracker = Arc::clone(&mate_tracker);
+
+                scope.spawn(move |_| {
+                    let mut counter = ThreadCounter::new(count_size, args);
+                    let mut record = MinimalRecord::default();
+
+                    // Process batches until channel closes
+                    while let Ok(batch) = rx.recv() {
+                        process_paired_batch(
+                            &batch,
+                            &mut record,
+                            &mut counter,
+                            ref_to_chrom,
+                            annotation,
+                            args,
+                            &mate_tracker,
+                        );
+                    }
+
+                    (counter.counts, counter.stats)
+                })
+            })
+            .collect();
+
+        // Drop extra receiver so channel closes when producer is done
+        drop(rx);
+
+        // Producer: read batches and send to workers
+        while let Some(batch) = reader.read_batch().expect("Failed to read batch") {
+            if tx.send(batch).is_err() {
+                break; // Workers gone
+            }
+        }
+
+        // Close channel to signal workers to finish
+        drop(tx);
+
+        // Collect and merge results
+        let mut final_counts = vec![0i64; count_size];
+        let mut final_stats = ReadCounters::default();
+
+        for handle in worker_handles {
+            let (counts, stats) = handle.join().expect("Worker thread panicked");
+            for (i, &count) in counts.iter().enumerate() {
+                final_counts[i] += count;
+            }
+            final_stats.merge(&stats);
+        }
+
+        // Handle orphan mates (reads whose mate was never found)
+        let orphans = mate_tracker.drain_all();
+        if !orphans.is_empty() {
+            debug!("{} orphan mates remaining after processing", orphans.len());
+            // These are singletons - we could count them if require_both_aligned is false
+            if !args.require_both_aligned {
+                // Process orphans as single-end reads
+                for (_hash, deferred) in orphans {
+                    process_deferred_as_single(
+                        &deferred,
+                        &mut final_counts,
+                        &mut final_stats,
+                        annotation,
+                        args,
+                    );
+                }
+            } else {
+                final_stats.unassigned_singleton += orphans.len() as u64;
+            }
+        }
+
+        (final_counts, final_stats)
+    });
+
+    result.map_err(|_| anyhow::anyhow!("Scoped thread panicked"))
+}
+
+/// Process a batch of paired-end records
+fn process_paired_batch(
+    batch: &crate::alignment::block_reader::RecordBatch,
+    record: &mut crate::alignment::minimal_parser::MinimalRecord,
+    counter: &mut ThreadCounter,
+    ref_to_chrom: &[Option<u16>],
+    annotation: &AnnotationIndex,
+    args: &Args,
+    mate_tracker: &ShardedMateTracker,
+) {
+    use crate::alignment::minimal_parser::get_record_size;
+
+    let mut offset = 0;
+    let data = &batch.data;
+
+    while offset + 4 <= data.len() {
+        let record_size = get_record_size(&data[offset..]);
+        if record_size == 0 {
+            break;
+        }
+
+        let data_start = offset + 4;
+        let data_end = data_start + record_size;
+
+        if data_end > data.len() {
+            break;
+        }
+
+        // Parse record - need read name for mate tracking
+        // Note: parse_bam_record expects data WITHOUT the 4-byte size prefix
+        if crate::alignment::minimal_parser::parse_bam_record(&data[data_start..data_end], record, true).is_err() {
+            offset = data_end;
+            continue;
+        }
+
+        offset = data_end;
+
+        // Skip unmapped reads
+        if record.is_unmapped() {
+            counter.stats.unassigned_unmapped += 1;
+            continue;
+        }
+
+        // Skip secondary/supplementary if primary-only mode
+        if args.primary_only && (record.is_secondary() || record.is_supplementary()) {
+            counter.stats.unassigned_secondary += 1;
+            continue;
+        }
+
+        // Skip low quality
+        if record.mapq < args.min_mapping_quality {
+            counter.stats.unassigned_mapping_quality += 1;
+            continue;
+        }
+
+        // Skip duplicates if requested
+        if args.ignore_duplicates && record.is_duplicate() {
+            counter.stats.unassigned_duplicate += 1;
+            continue;
+        }
+
+        // Skip multi-mappers if not counting them
+        if !args.count_multi_mapping && record.nh > 1 {
+            counter.stats.unassigned_multimapping += 1;
+            continue;
+        }
+
+        // Get chromosome ID
+        let chrom_id = if record.ref_id >= 0 && (record.ref_id as usize) < ref_to_chrom.len() {
+            ref_to_chrom[record.ref_id as usize]
+        } else {
+            None
+        };
+
+        let chrom_id = match chrom_id {
+            Some(id) => id,
+            None => {
+                counter.stats.unassigned_no_features += 1;
+                continue;
+            }
+        };
+
+        // Check if mate is mapped
+        if record.is_mate_unmapped() {
+            if args.require_both_aligned {
+                counter.stats.unassigned_singleton += 1;
+                continue;
+            }
+            // Process as single-end
+            process_minimal_single_read(record, chrom_id, counter, args, annotation);
+            continue;
+        }
+
+        // Check for chimeric reads
+        let mate_chrom_id = if record.mate_ref_id >= 0
+            && (record.mate_ref_id as usize) < ref_to_chrom.len()
+        {
+            ref_to_chrom[record.mate_ref_id as usize]
+        } else {
+            None
+        };
+
+        if mate_chrom_id != Some(chrom_id) {
+            if !args.count_chimeric {
+                counter.stats.unassigned_chimeric += 1;
+                continue;
+            }
+        }
+
+        // Create deferred read for mate tracking
+        let deferred = DeferredRead {
+            chrom_id,
+            start: record.pos as u32,
+            intervals: record.intervals.clone(),
+            flags: record.flags,
+            mapq: record.mapq,
+            nh: record.nh,
+        };
+
+        // Hash the read name and try to find/store mate
+        let name_hash = ShardedMateTracker::hash_name(&record.read_name);
+
+        if let Some(mate) = mate_tracker.insert_or_get(name_hash, deferred) {
+            // Found mate - process as fragment
+            process_minimal_fragment(record, chrom_id, &mate, counter, args, annotation);
+        }
+        // Otherwise, stored for later matching
+    }
+}
+
+/// Process a MinimalRecord as a single-end read
+fn process_minimal_single_read(
+    record: &crate::alignment::minimal_parser::MinimalRecord,
+    chrom_id: u16,
+    counter: &mut ThreadCounter,
+    args: &Args,
+    annotation: &AnnotationIndex,
+) {
+    counter.hit_buffer.clear();
+
+    for interval in &record.intervals {
+        for (feat_idx, feature) in
+            annotation.find_overlapping(chrom_id, interval.start, interval.end)
+        {
+            // Check strand if stranded mode
+            let record_strand = if record.is_reverse() {
+                crate::annotation::Strand::Reverse
+            } else {
+                crate::annotation::Strand::Forward
+            };
+
+            if !overlap::check_strand_with_strand(record_strand, feature, args) {
+                continue;
+            }
+
+            // Calculate overlap if needed
+            let overlap_len = if args.need_overlap_length() {
+                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+            } else {
+                1
+            };
+
+            // Check minimum overlap
+            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
+                continue;
+            }
+
+            counter.hit_buffer.push(overlap::FeatureHit {
+                feature_idx: feat_idx,
+                gene_id: feature.gene_id,
+                overlap_len,
+            });
+        }
+    }
+
+    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
+    counter.apply_assignment(assignment, record.nh, args);
+}
+
+/// Process a fragment (both mates found) from MinimalRecord
+fn process_minimal_fragment(
+    record: &crate::alignment::minimal_parser::MinimalRecord,
+    chrom_id: u16,
+    mate: &DeferredRead,
+    counter: &mut ThreadCounter,
+    args: &Args,
+    annotation: &AnnotationIndex,
+) {
+    counter.hit_buffer.clear();
+
+    let record_strand = if record.is_reverse() {
+        crate::annotation::Strand::Reverse
+    } else {
+        crate::annotation::Strand::Forward
+    };
+
+    let mate_strand = if mate.is_reverse_strand() {
+        crate::annotation::Strand::Reverse
+    } else {
+        crate::annotation::Strand::Forward
+    };
+
+    // Hits from current record
+    for interval in &record.intervals {
+        for (feat_idx, feature) in
+            annotation.find_overlapping(chrom_id, interval.start, interval.end)
+        {
+            if !overlap::check_strand_paired_with_strands(record_strand, mate_strand, feature, args)
+            {
+                continue;
+            }
+
+            let overlap_len = if args.need_overlap_length() {
+                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                    + crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
+            } else {
+                1
+            };
+
+            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
+                continue;
+            }
+
+            counter.hit_buffer.push(overlap::FeatureHit {
+                feature_idx: feat_idx,
+                gene_id: feature.gene_id,
+                overlap_len,
+            });
+        }
+    }
+
+    // Hits from mate (if on same chromosome)
+    if mate.chrom_id == chrom_id {
+        for interval in &mate.intervals {
+            for (feat_idx, feature) in
+                annotation.find_overlapping(chrom_id, interval.start, interval.end)
+            {
+                // Skip if already counted
+                if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
+                    continue;
+                }
+
+                if !overlap::check_strand_paired_with_strands(
+                    record_strand,
+                    mate_strand,
+                    feature,
+                    args,
+                ) {
+                    continue;
+                }
+
+                let overlap_len = if args.need_overlap_length() {
+                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                        + crate::alignment::total_overlap(
+                            &mate.intervals,
+                            feature.start,
+                            feature.end,
+                        )
+                } else {
+                    1
+                };
+
+                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
+                {
+                    continue;
+                }
+
+                counter.hit_buffer.push(overlap::FeatureHit {
+                    feature_idx: feat_idx,
+                    gene_id: feature.gene_id,
+                    overlap_len,
+                });
+            }
+        }
+    }
+
+    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
+    counter.apply_assignment(assignment, record.nh.max(mate.nh), args);
+}
+
+/// Process a deferred read as single-end (for orphan handling)
+fn process_deferred_as_single(
+    deferred: &DeferredRead,
+    counts: &mut [i64],
+    stats: &mut ReadCounters,
+    annotation: &AnnotationIndex,
+    args: &Args,
+) {
+    let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(16);
+
+    for interval in &deferred.intervals {
+        for (feat_idx, feature) in
+            annotation.find_overlapping(deferred.chrom_id, interval.start, interval.end)
+        {
+            let deferred_strand = if deferred.is_reverse_strand() {
+                crate::annotation::Strand::Reverse
+            } else {
+                crate::annotation::Strand::Forward
+            };
+
+            if !overlap::check_strand_with_strand(deferred_strand, feature, args) {
+                continue;
+            }
+
+            let overlap_len = if args.need_overlap_length() {
+                crate::alignment::total_overlap(&deferred.intervals, feature.start, feature.end)
+            } else {
+                1
+            };
+
+            if !overlap::check_overlap_thresholds(overlap_len, &deferred.intervals, feature, args) {
+                continue;
+            }
+
+            hit_buffer.push(overlap::FeatureHit {
+                feature_idx: feat_idx,
+                gene_id: feature.gene_id,
+                overlap_len,
+            });
+        }
+    }
+
+    let assignment = overlap::resolve_assignment(&hit_buffer, args);
+
+    // Apply assignment directly to counts/stats
+    match assignment {
+        overlap::Assignment::Unique(hit) => {
+            let id = if args.feature_level {
+                hit.feature_idx as usize
+            } else {
+                hit.gene_id as usize
+            };
+            counts[id] += 1_000_000; // Fixed-point
+            stats.assigned += 1;
+        }
+        overlap::Assignment::Ambiguous => {
+            stats.unassigned_ambiguous += 1;
+        }
+        overlap::Assignment::NoFeature => {
+            stats.unassigned_no_features += 1;
+        }
+        overlap::Assignment::MultiOverlap(hits) => {
+            if args.allow_multi_overlap {
+                let frac = 1_000_000 / hits.len() as i64;
+                for hit in hits {
+                    let id = if args.feature_level {
+                        hit.feature_idx as usize
+                    } else {
+                        hit.gene_id as usize
+                    };
+                    counts[id] += frac;
+                }
+                stats.assigned += 1;
+            } else {
+                stats.unassigned_ambiguous += 1;
+            }
+        }
+    }
+}
+
+/// Count reads using parallel processing for paired-end mode
+pub fn count_reads_parallel_paired(args: &Args, annotation: &AnnotationIndex) -> Result<CountResult> {
+    let num_features = annotation.features.len();
+    let num_genes = annotation.gene_names.len();
+    let count_size = if args.feature_level {
+        num_features
+    } else {
+        num_genes
+    };
+
+    // Process each BAM file
+    let progress = AtomicUsize::new(0);
+
+    let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
+        .bam_files
+        .iter()
+        .map(|bam_path| {
+            let result = process_bam_parallel_paired(bam_path, args, annotation, count_size);
+
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            info!(
+                "Processed {}/{} BAM files: {}",
+                done,
+                args.bam_files.len(),
+                bam_path.display()
+            );
+
+            result
+        })
+        .collect();
+
+    // Merge results
+    let mut final_counts = vec![0i64; count_size];
+    let mut final_stats = ReadCounters::default();
+
+    for result in results {
+        let (counts, stats) = result?;
+        for (i, count) in counts.into_iter().enumerate() {
+            final_counts[i] += count;
+        }
+        final_stats.merge(&stats);
+    }
+
+    debug!(
+        "Parallel paired: {} assigned, {} unassigned",
         final_stats.assigned,
         final_stats.total_unassigned()
     );

@@ -65,21 +65,37 @@ impl AnnotationIndex {
     ) -> Result<Self> {
         let num_chroms = id_to_chrom.len();
 
+        // Build chromosome boundaries in a single pass O(n) instead of O(m*n)
+        // Features are sorted by (chrom_id, start), so we can find boundaries efficiently
+        let mut chrom_boundaries: Vec<(usize, usize)> = vec![(0, 0); num_chroms];
+
+        if !features.is_empty() {
+            let mut current_chrom = features[0].chrom_id as usize;
+            let mut start_idx = 0;
+
+            for (i, f) in features.iter().enumerate() {
+                let fchrom = f.chrom_id as usize;
+                if fchrom != current_chrom {
+                    // Close out the previous chromosome
+                    chrom_boundaries[current_chrom] = (start_idx, i);
+                    // Handle any skipped chromosomes (with no features)
+                    for skip_chrom in (current_chrom + 1)..fchrom {
+                        chrom_boundaries[skip_chrom] = (i, i); // Empty range
+                    }
+                    current_chrom = fchrom;
+                    start_idx = i;
+                }
+            }
+            // Close out the last chromosome
+            chrom_boundaries[current_chrom] = (start_idx, features.len());
+        }
+
         // Build per-chromosome indices
         let mut chrom_indices: Vec<ChromIndex> = Vec::with_capacity(num_chroms);
 
         for chrom_id in 0..num_chroms as u16 {
-            // Find feature range for this chromosome
-            let start_idx = features
-                .iter()
-                .position(|f| f.chrom_id == chrom_id)
-                .unwrap_or(features.len());
-
-            let end_idx = features
-                .iter()
-                .rposition(|f| f.chrom_id == chrom_id)
-                .map(|i| i + 1)
-                .unwrap_or(start_idx);
+            // Get pre-computed boundaries O(1)
+            let (start_idx, end_idx) = chrom_boundaries[chrom_id as usize];
 
             if start_idx >= end_idx {
                 // No features on this chromosome

@@ -31,7 +31,7 @@ pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {
     let mut features: Vec<Feature> = Vec::with_capacity(500_000);
 
     let feature_type = args.feature_type.as_bytes();
-    let gene_id_attr = format!("gene_id \"");
+    let gene_id_attr = "gene_id \"".to_string();
     let gene_id_attr_bytes = gene_id_attr.as_bytes();
 
     for line in reader.lines() {
@@ -83,10 +83,10 @@ pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {
         });
 
         // Parse start (field 3) and end (field 4)
-        let start_str = std::str::from_utf8(&bytes[field_starts[3]..field_starts[4] - 1])
-            .unwrap_or("0");
-        let end_str = std::str::from_utf8(&bytes[field_starts[4]..field_starts[5] - 1])
-            .unwrap_or("0");
+        let start_str =
+            std::str::from_utf8(&bytes[field_starts[3]..field_starts[4] - 1]).unwrap_or("0");
+        let end_str =
+            std::str::from_utf8(&bytes[field_starts[4]..field_starts[5] - 1]).unwrap_or("0");
         let start: u32 = start_str.parse().unwrap_or(0);
         let end: u32 = end_str.parse().unwrap_or(0);
 

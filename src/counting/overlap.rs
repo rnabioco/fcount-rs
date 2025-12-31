@@ -99,9 +99,7 @@ pub fn check_strand_paired(
 pub fn check_strand_with_strand(read_strand: Strand, feature: &Feature, args: &Args) -> bool {
     match args.strand_mode() {
         StrandMode::Unstranded => true,
-        StrandMode::Stranded => {
-            feature.strand == read_strand || feature.strand == Strand::Unknown
-        }
+        StrandMode::Stranded => feature.strand == read_strand || feature.strand == Strand::Unknown,
         StrandMode::ReverselyStranded => {
             let expected_strand = match read_strand {
                 Strand::Forward => Strand::Reverse,

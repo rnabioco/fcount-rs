@@ -60,7 +60,10 @@ fn main() -> Result<()> {
         counting::count_reads(&args, &annotation)?
     };
     let bam_elapsed = bam_start.elapsed();
-    info!("BAM processing completed in {:.2}s", bam_elapsed.as_secs_f64());
+    info!(
+        "BAM processing completed in {:.2}s",
+        bam_elapsed.as_secs_f64()
+    );
 
     // Write output
     let output_start = Instant::now();

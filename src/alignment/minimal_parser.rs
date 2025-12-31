@@ -227,7 +227,7 @@ pub fn parse_bam_record(
     );
 
     // Aux data starts after seq and qual
-    let seq_len = (l_seq + 1) / 2;
+    let seq_len = l_seq.div_ceil(2);
     let aux_start = cigar_end + seq_len + l_seq;
 
     // Parse NH tag from aux data
@@ -255,7 +255,7 @@ fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interv
     for chunk in cigar_data.chunks_exact(4) {
         let op_raw = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let op_type = (op_raw & 0xF) as u8;
-        let op_len = (op_raw >> 4) as u32;
+        let op_len = op_raw >> 4;
 
         match op_type {
             // Operations that consume reference and are part of alignment

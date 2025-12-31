@@ -9,6 +9,10 @@ repository = "https://github.com/rnabioco/fcount-rs"
 keywords = ["bioinformatics", "rna-seq", "genomics", "feature-counts"]
 categories = ["science", "command-line-utilities"]
 
+[[bin]]
+name = "fcount"
+path = "src/main.rs"
+
 [dependencies]
 # BAM/SAM parsing (pure Rust)
 noodles-bam = "0.68"

@@ -1,121 +1,165 @@
-use clap::Parser;
+use clap::{builder::styling, Parser};
 use std::path::PathBuf;
 
+fn styles() -> styling::Styles {
+    styling::Styles::styled()
+        .header(styling::AnsiColor::Green.on_default().bold())
+        .usage(styling::AnsiColor::Green.on_default().bold())
+        .literal(styling::AnsiColor::Cyan.on_default().bold())
+        .placeholder(styling::AnsiColor::Yellow.on_default())
+}
+
 #[derive(Parser, Debug, Clone)]
-#[command(name = "fcount-rs")]
+#[command(name = "fcount")]
 #[command(author, version, about = "Ultrafast feature counting for RNA-seq data")]
+#[command(styles = styles())]
 #[command(
     long_about = "A high-performance Rust alternative to featureCounts for counting reads \
     that map to genomic features such as genes, exons, and transcripts."
 )]
 pub struct Args {
+    // ============ Required Arguments ============
     /// GTF/GFF annotation file
-    #[arg(short = 'a', long = "annotation")]
+    #[arg(short = 'a', long = "annotation", help_heading = "Input/Output")]
     pub annotation: PathBuf,
 
     /// Output count matrix file
-    #[arg(short = 'o', long = "output")]
+    #[arg(short = 'o', long = "output", help_heading = "Input/Output")]
     pub output: PathBuf,
 
     /// Input BAM/SAM file(s)
-    #[arg(required = true)]
+    #[arg(required = true, help_heading = "Input/Output")]
     pub bam_files: Vec<PathBuf>,
 
-    // === Counting options ===
+    // ============ Feature Selection ============
     /// Feature type to count (e.g., exon, gene)
-    #[arg(short = 't', long = "type", default_value = "exon")]
+    #[arg(
+        short = 't',
+        long = "type",
+        default_value = "exon",
+        help_heading = "Feature Selection"
+    )]
     pub feature_type: String,
 
     /// GTF attribute for gene ID
-    #[arg(short = 'g', long = "gene-id", default_value = "gene_id")]
+    #[arg(
+        short = 'g',
+        long = "gene-id",
+        default_value = "gene_id",
+        help_heading = "Feature Selection"
+    )]
     pub gene_id_attr: String,
 
     /// Count at feature level instead of gene level
-    #[arg(short = 'f', long = "feature-level")]
+    #[arg(
+        short = 'f',
+        long = "feature-level",
+        help_heading = "Feature Selection"
+    )]
     pub feature_level: bool,
 
-    // === Paired-end options ===
+    // ============ Read Filtering ============
+    /// Minimum mapping quality (0-255)
+    #[arg(
+        short = 'Q',
+        long = "min-mapq",
+        default_value = "0",
+        help_heading = "Read Filtering"
+    )]
+    pub min_mapping_quality: u8,
+
+    /// Count primary alignments only (skip secondary/supplementary)
+    #[arg(long = "primary", help_heading = "Read Filtering")]
+    pub primary_only: bool,
+
+    /// Ignore duplicate reads (FLAG 0x400)
+    #[arg(long = "ignore-dup", help_heading = "Read Filtering")]
+    pub ignore_duplicates: bool,
+
+    // ============ Paired-End Mode ============
     /// Count fragments instead of reads (paired-end mode)
-    #[arg(short = 'p', long = "paired")]
+    #[arg(short = 'p', long = "paired", help_heading = "Paired-End Mode")]
     pub paired_end: bool,
 
     /// Require both ends to be aligned
-    #[arg(short = 'B', long = "both-aligned")]
+    #[arg(short = 'B', long = "both-aligned", help_heading = "Paired-End Mode")]
     pub require_both_aligned: bool,
 
-    /// Count chimeric fragments (mates on different chromosomes)
-    #[arg(short = 'C', long = "count-chimeric")]
-    pub count_chimeric: bool,
-
-    /// Minimum fragment length for paired-end
-    #[arg(long = "min-frag-len", default_value = "50")]
-    pub min_fragment_length: u32,
-
-    /// Maximum fragment length for paired-end
-    #[arg(long = "max-frag-len", default_value = "600")]
-    pub max_fragment_length: u32,
-
-    // === Strand options ===
+    // ============ Strandedness ============
     /// Strand-specificity: 0=unstranded, 1=stranded, 2=reversely stranded
-    #[arg(short = 's', long = "strand", default_value = "0")]
+    #[arg(
+        short = 's',
+        long = "strand",
+        default_value = "0",
+        help_heading = "Strandedness"
+    )]
     pub strand_mode: u8,
 
-    // === Multi-mapping options ===
-    /// Count multi-mapping reads
-    #[arg(short = 'M', long = "multi-mapping")]
+    // ============ Multi-Mapping Reads ============
+    /// Count multi-mapping reads (reads with NH > 1)
+    #[arg(short = 'M', long = "multi-mapping", help_heading = "Multi-Mapping")]
     pub count_multi_mapping: bool,
 
-    /// Use fractional counting for multi-mappers
-    #[arg(long = "fraction")]
+    /// Use fractional counting (1/NH) for multi-mappers
+    #[arg(long = "fraction", help_heading = "Multi-Mapping")]
     pub fractional_counting: bool,
 
-    /// Count primary alignments only
-    #[arg(long = "primary")]
-    pub primary_only: bool,
-
-    // === Overlap options ===
-    /// Allow reads to be assigned to multiple overlapping features
-    #[arg(short = 'O', long = "multi-overlap")]
+    // ============ Overlap Handling ============
+    /// Allow reads to overlap multiple features/genes
+    #[arg(short = 'O', long = "multi-overlap", help_heading = "Overlap Handling")]
     pub allow_multi_overlap: bool,
 
-    /// Minimum number of overlapping bases
-    #[arg(long = "min-overlap", default_value = "1")]
+    /// Minimum number of overlapping bases required
+    #[arg(
+        long = "min-overlap",
+        default_value = "1",
+        help_heading = "Overlap Handling"
+    )]
     pub min_overlap_bases: u32,
 
-    /// Minimum fraction of read that must overlap feature
-    #[arg(long = "frac-overlap", default_value = "0.0")]
+    /// Minimum fraction of read that must overlap feature (0.0-1.0)
+    #[arg(
+        long = "frac-overlap",
+        default_value = "0.0",
+        help_heading = "Overlap Handling"
+    )]
     pub min_overlap_fraction: f32,
 
-    /// Minimum fraction of feature that must be overlapped
-    #[arg(long = "frac-overlap-feature", default_value = "0.0")]
+    /// Minimum fraction of feature that must be overlapped (0.0-1.0)
+    #[arg(
+        long = "frac-overlap-feature",
+        default_value = "0.0",
+        help_heading = "Overlap Handling"
+    )]
     pub min_feature_overlap_fraction: f32,
 
     /// Assign reads to the feature with the largest overlap only
-    #[arg(long = "largest-overlap")]
+    #[arg(long = "largest-overlap", help_heading = "Overlap Handling")]
     pub largest_overlap_only: bool,
 
-    // === Filtering options ===
-    /// Minimum mapping quality
-    #[arg(short = 'Q', long = "min-mapq", default_value = "0")]
-    pub min_mapping_quality: u8,
-
-    /// Ignore duplicate reads (FLAG 0x400)
-    #[arg(long = "ignore-dup")]
-    pub ignore_duplicates: bool,
-
-    // === Performance options ===
-    /// Number of threads
-    #[arg(short = 'T', long = "threads", default_value = "1")]
+    // ============ Performance ============
+    /// Number of threads for parallel processing
+    #[arg(
+        short = 'T',
+        long = "threads",
+        default_value = "1",
+        help_heading = "Performance"
+    )]
     pub threads: usize,
 
-    // === Output options ===
-    /// Output detailed assignment per read
-    #[arg(short = 'R', long = "details")]
+    // ============ Output Options ============
+    /// Output detailed assignment per read (not yet implemented)
+    #[arg(short = 'R', long = "details", help_heading = "Output Options")]
     pub details_file: Option<PathBuf>,
 
     /// Suppress progress output
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", help_heading = "Output Options")]
     pub quiet: bool,
+
+    // ============ Not Yet Implemented ============
+    /// Count chimeric fragments (mates on different chromosomes) [NOT IMPLEMENTED]
+    #[arg(short = 'C', long = "count-chimeric", hide = true)]
+    pub count_chimeric: bool,
 }
 
 impl Args {

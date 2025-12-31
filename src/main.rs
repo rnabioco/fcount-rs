@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let total_start = Instant::now();
 
-    info!("fcount-rs v{}", env!("CARGO_PKG_VERSION"));
+    info!("fcount v{}", env!("CARGO_PKG_VERSION"));
     info!("Loading annotation from: {}", args.annotation.display());
 
     // Load annotation and build index

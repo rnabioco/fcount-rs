@@ -371,15 +371,15 @@ fn process_bam_parallel(
 ) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
 
-    // Open BAM reader
-    let mut reader = BamBlockReader::open(bam_path, annotation)?;
+    // Open BAM reader with all available threads for decompression
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, args.threads)?;
     let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
 
     // Number of worker threads
     let num_workers = args.threads.max(1);
 
-    // Channel for batch distribution (bounded to limit memory usage)
-    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 2);
+    // Channel for batch distribution - larger buffer to prevent worker starvation
+    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
@@ -503,8 +503,8 @@ fn process_bam_parallel_paired(
     use crate::alignment::block_reader::RecordBatch;
     use crate::alignment::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
 
-    // Open BAM reader
-    let mut reader = BamBlockReader::open(bam_path, annotation)?;
+    // Open BAM reader with all available threads for decompression
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, args.threads)?;
     let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
 
     // Number of worker threads
@@ -513,8 +513,8 @@ fn process_bam_parallel_paired(
     // Create sharded mate tracker with 4x shards per worker to reduce contention
     let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 4));
 
-    // Channel for batch distribution (bounded to limit memory usage)
-    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 2);
+    // Channel for batch distribution - larger buffer to prevent worker starvation
+    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {

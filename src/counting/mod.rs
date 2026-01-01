@@ -7,7 +7,7 @@ mod stats;
 mod worker;
 
 pub use constants::{
-    channel_buffer_size, mate_tracker_shards, threads_per_file, FRACTION_MULTIPLIER,
+    FRACTION_MULTIPLIER, channel_buffer_size, mate_tracker_shards, threads_per_file,
 };
 pub use filtering::Filterable;
 
@@ -20,8 +20,8 @@ use crossbeam::channel;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info};
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::alignment::block_reader::BamBlockReader;
 use crate::alignment::{AlignmentReader, AlignmentRecord, MateTracker, PendingMate};

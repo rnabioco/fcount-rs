@@ -115,11 +115,7 @@ fn compare_gene_level(
         }
     }
 
-    if diffs.is_empty() {
-        Ok(())
-    } else {
-        Err(diffs)
-    }
+    if diffs.is_empty() { Ok(()) } else { Err(diffs) }
 }
 
 fn counts_match(actual: f64, expected: f64, tolerance: f64) -> bool {

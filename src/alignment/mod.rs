@@ -4,6 +4,6 @@ pub mod minimal_parser;
 mod paired;
 mod reader;
 
-pub use cigar::{total_overlap, Interval};
+pub use cigar::{Interval, total_overlap};
 pub use paired::{MateTracker, PendingMate};
 pub use reader::{AlignmentReader, AlignmentRecord};

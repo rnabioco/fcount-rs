@@ -243,7 +243,7 @@ fn test_multiple_hits_same_gene_returns_unique() {
 #[test]
 fn test_multiple_genes_without_multi_overlap_returns_ambiguous() {
     let args = default_args(); // allow_multi_overlap = false
-                               // Two features from different genes
+    // Two features from different genes
     let hits = vec![
         FeatureHit {
             feature_idx: 0,

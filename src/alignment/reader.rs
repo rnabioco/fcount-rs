@@ -40,7 +40,7 @@ pub struct AlignmentRecord {
     /// Mapping quality
     pub mapq: u8,
     /// Parsed CIGAR intervals
-    pub intervals: SmallVec<[Interval; 4]>,
+    pub intervals: SmallVec<[Interval; 8]>,
     /// NH tag value (number of alignments, 1 if not present)
     pub nh: u8,
     /// Mate chromosome ID (for paired-end)

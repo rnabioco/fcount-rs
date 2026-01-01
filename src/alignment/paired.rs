@@ -12,7 +12,7 @@ pub struct PendingMate {
     /// 1-based start position
     pub start: u32,
     /// Parsed CIGAR intervals
-    pub intervals: SmallVec<[Interval; 4]>,
+    pub intervals: SmallVec<[Interval; 8]>,
     /// SAM flags
     pub flags: u16,
     /// Mapping quality
@@ -77,7 +77,7 @@ impl MateTracker {
         read_name: &[u8],
         chrom_id: u16,
         start: u32,
-        intervals: SmallVec<[Interval; 4]>,
+        intervals: SmallVec<[Interval; 8]>,
         flags: u16,
         mapq: u8,
         nh: u8,
@@ -91,15 +91,31 @@ impl MateTracker {
 
         // Evict old entries if too many pending
         if self.pending.len() >= self.max_pending {
-            // Simple eviction: clear half the entries
-            // In practice, this shouldn't happen often with sorted BAMs
-            let to_remove: Vec<_> = self
+            // Position-aware eviction: remove mates furthest from current position
+            // In coordinate-sorted BAMs, mates should be nearby - distant ones are likely orphans
+            let current_chrom = chrom_id;
+            let current_pos = start;
+
+            // Collect (key, distance) pairs
+            let mut distances: Vec<_> = self
                 .pending
-                .keys()
-                .take(self.max_pending / 2)
-                .copied()
+                .iter()
+                .map(|(&k, mate)| {
+                    let dist = if mate.chrom_id != current_chrom {
+                        // Different chromosome = maximum distance (likely orphan)
+                        u64::MAX
+                    } else {
+                        // Same chromosome = absolute position difference
+                        (mate.start as i64 - current_pos as i64).unsigned_abs()
+                    };
+                    (k, dist)
+                })
                 .collect();
-            for key in to_remove {
+
+            // Sort by distance (descending) and remove furthest half
+            distances.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+            for (key, _) in distances.into_iter().take(self.max_pending / 2) {
                 self.pending.remove(&key);
             }
         }
@@ -144,11 +160,11 @@ mod tests {
     fn test_mate_tracking() {
         let mut tracker = MateTracker::new(1000);
 
-        let intervals1: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        let intervals1: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
             start: 100,
             end: 200
         }];
-        let intervals2: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        let intervals2: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
             start: 300,
             end: 400
         }];
@@ -172,7 +188,7 @@ mod tests {
     fn test_different_reads() {
         let mut tracker = MateTracker::new(1000);
 
-        let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        let intervals: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
             start: 100,
             end: 200
         }];

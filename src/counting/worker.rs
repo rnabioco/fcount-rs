@@ -44,7 +44,7 @@ impl Worker {
         Worker {
             counts: vec![0i64; count_size],
             stats: ReadCounters::default(),
-            hit_buffer: Vec::with_capacity(64),
+            hit_buffer: Vec::with_capacity(8),
             record: MinimalRecord::new(),
             ref_to_chrom,
             args,

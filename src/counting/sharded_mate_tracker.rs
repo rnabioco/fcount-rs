@@ -19,7 +19,7 @@ pub struct DeferredRead {
     /// 1-based start position
     pub start: u32,
     /// Parsed CIGAR intervals
-    pub intervals: SmallVec<[Interval; 4]>,
+    pub intervals: SmallVec<[Interval; 8]>,
     /// SAM flags
     pub flags: u16,
     /// Mapping quality
@@ -135,7 +135,7 @@ mod tests {
     fn test_mate_tracking() {
         let tracker = ShardedMateTracker::new(4);
 
-        let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        let intervals: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
             start: 100,
             end: 200
         }];
@@ -178,7 +178,7 @@ mod tests {
     fn test_different_reads() {
         let tracker = ShardedMateTracker::new(4);
 
-        let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        let intervals: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
             start: 100,
             end: 200
         }];
@@ -213,7 +213,7 @@ mod tests {
         for thread_id in 0..4 {
             let tracker = Arc::clone(&tracker);
             handles.push(thread::spawn(move || {
-                let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+                let intervals: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
                     start: 100,
                     end: 200
                 }];

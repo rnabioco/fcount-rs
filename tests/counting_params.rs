@@ -434,7 +434,7 @@ fn test_min_overlap_fraction_filter() {
     };
 
     // 100bp read (interval from 100 to 199 is 99bp, but we use 100 for simpler math)
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+    let intervals: SmallVec<[Interval; 8]> = smallvec::smallvec![Interval {
         start: 100,
         end: 199
     }];

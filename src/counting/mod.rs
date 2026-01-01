@@ -31,10 +31,21 @@ use worker::Worker;
 
 /// Result of counting reads across all BAM files
 pub struct CountResult {
-    /// Gene-level counts (or feature-level if specified)
-    pub counts: Vec<i64>,
-    /// Aggregated QC statistics
-    pub stats: ReadCounters,
+    /// Per-sample counts: counts_per_sample[sample_idx][feature_idx]
+    pub counts_per_sample: Vec<Vec<i64>>,
+    /// Per-sample QC statistics
+    pub stats_per_sample: Vec<ReadCounters>,
+}
+
+impl CountResult {
+    /// Get aggregated stats across all samples (for summary output)
+    pub fn aggregated_stats(&self) -> ReadCounters {
+        let mut stats = ReadCounters::default();
+        for s in &self.stats_per_sample {
+            stats.merge(s);
+        }
+        stats
+    }
 }
 
 /// Count reads in all BAM files
@@ -74,27 +85,31 @@ pub fn count_reads(args: &Args, annotation: &AnnotationIndex) -> Result<CountRes
         })
         .collect();
 
-    // Merge results
-    let mut final_counts = vec![0i64; count_size];
-    let mut final_stats = ReadCounters::default();
+    // Collect per-sample results (don't merge)
+    let mut counts_per_sample = Vec::with_capacity(args.bam_files.len());
+    let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
 
     for result in results {
         let (counts, stats) = result?;
-        for (i, count) in counts.into_iter().enumerate() {
-            final_counts[i] += count;
-        }
-        final_stats.merge(&stats);
+        counts_per_sample.push(counts);
+        stats_per_sample.push(stats);
     }
+
+    let aggregated = CountResult {
+        counts_per_sample: counts_per_sample.clone(),
+        stats_per_sample: stats_per_sample.clone(),
+    }
+    .aggregated_stats();
 
     debug!(
         "Total: {} assigned, {} unassigned",
-        final_stats.assigned,
-        final_stats.total_unassigned()
+        aggregated.assigned,
+        aggregated.total_unassigned()
     );
 
     Ok(CountResult {
-        counts: final_counts,
-        stats: final_stats,
+        counts_per_sample,
+        stats_per_sample,
     })
 }
 
@@ -563,27 +578,31 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
 
     pb.finish_with_message("Done");
 
-    // Merge results
-    let mut final_counts = vec![0i64; count_size];
-    let mut final_stats = ReadCounters::default();
+    // Collect per-sample results (don't merge)
+    let mut counts_per_sample = Vec::with_capacity(args.bam_files.len());
+    let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
 
     for result in results {
         let (counts, stats) = result?;
-        for (i, count) in counts.into_iter().enumerate() {
-            final_counts[i] += count;
-        }
-        final_stats.merge(&stats);
+        counts_per_sample.push(counts);
+        stats_per_sample.push(stats);
     }
+
+    let aggregated = CountResult {
+        counts_per_sample: counts_per_sample.clone(),
+        stats_per_sample: stats_per_sample.clone(),
+    }
+    .aggregated_stats();
 
     debug!(
         "Total: {} assigned, {} unassigned",
-        final_stats.assigned,
-        final_stats.total_unassigned()
+        aggregated.assigned,
+        aggregated.total_unassigned()
     );
 
     Ok(CountResult {
-        counts: final_counts,
-        stats: final_stats,
+        counts_per_sample,
+        stats_per_sample,
     })
 }
 
@@ -1146,26 +1165,30 @@ pub fn count_reads_parallel_paired(
 
     pb.finish_with_message("Done");
 
-    // Merge results
-    let mut final_counts = vec![0i64; count_size];
-    let mut final_stats = ReadCounters::default();
+    // Collect per-sample results (don't merge)
+    let mut counts_per_sample = Vec::with_capacity(args.bam_files.len());
+    let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
 
     for result in results {
         let (counts, stats) = result?;
-        for (i, count) in counts.into_iter().enumerate() {
-            final_counts[i] += count;
-        }
-        final_stats.merge(&stats);
+        counts_per_sample.push(counts);
+        stats_per_sample.push(stats);
     }
+
+    let aggregated = CountResult {
+        counts_per_sample: counts_per_sample.clone(),
+        stats_per_sample: stats_per_sample.clone(),
+    }
+    .aggregated_stats();
 
     debug!(
         "Parallel paired: {} assigned, {} unassigned",
-        final_stats.assigned,
-        final_stats.total_unassigned()
+        aggregated.assigned,
+        aggregated.total_unassigned()
     );
 
     Ok(CountResult {
-        counts: final_counts,
-        stats: final_stats,
+        counts_per_sample,
+        stats_per_sample,
     })
 }

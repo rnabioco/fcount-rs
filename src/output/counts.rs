@@ -135,6 +135,15 @@ fn write_dexseq_format<W: Write>(
 
     // For each feature, output gene_id and gene_id:E### with per-gene counter
     for (feat_idx, feature) in annotation.features.iter().enumerate() {
+        // Skip features with zero counts across all samples
+        let has_counts = result
+            .counts_per_sample
+            .iter()
+            .any(|counts| counts.get(feat_idx).copied().unwrap_or(0) != 0);
+        if !has_counts {
+            continue;
+        }
+
         let gene_name = annotation
             .gene_names
             .get(feature.gene_id as usize)
@@ -149,14 +158,16 @@ fn write_dexseq_format<W: Write>(
         // Write gene_id and exon_id
         write!(writer, "{}\t{}", gene_name, exon_id)?;
 
-        // Write count for this feature
-        let count = result.counts.get(feat_idx).copied().unwrap_or(0);
-        let count_str = if args.fractional_counting {
-            format!("{:.6}", count as f64 / 1_000_000.0)
-        } else {
-            count.to_string()
-        };
-        write!(writer, "\t{}", count_str)?;
+        // Write count for each sample
+        for sample_counts in &result.counts_per_sample {
+            let count = sample_counts.get(feat_idx).copied().unwrap_or(0);
+            let count_str = if args.fractional_counting {
+                format!("{:.6}", count as f64 / 1_000_000.0)
+            } else {
+                count.to_string()
+            };
+            write!(writer, "\t{}", count_str)?;
+        }
 
         writeln!(writer)?;
     }
@@ -231,19 +242,24 @@ fn write_gene_level<W: Write>(
             .collect();
         let length = calculate_collapsed_length(&intervals);
 
-        // Count
-        let count = result.counts.get(gene_idx).copied().unwrap_or(0);
-        let count_str = if args.fractional_counting {
-            format!("{:.6}", count as f64 / 1_000_000.0)
-        } else {
-            count.to_string()
-        };
-
-        writeln!(
+        // Write gene metadata
+        write!(
             writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            gene_name, chrom_str, starts_str, ends_str, strand_str, length, count_str
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            gene_name, chrom_str, starts_str, ends_str, strand_str, length
         )?;
+
+        // Write counts for each sample
+        for sample_counts in &result.counts_per_sample {
+            let count = sample_counts.get(gene_idx).copied().unwrap_or(0);
+            let count_str = if args.fractional_counting {
+                format!("{:.6}", count as f64 / 1_000_000.0)
+            } else {
+                count.to_string()
+            };
+            write!(writer, "\t{}", count_str)?;
+        }
+        writeln!(writer)?;
     }
 
     Ok(())
@@ -274,24 +290,24 @@ fn write_feature_level<W: Write>(
             crate::annotation::Strand::Unknown => ".",
         };
 
-        let count = result.counts.get(feat_idx).copied().unwrap_or(0);
-        let count_str = if args.fractional_counting {
-            format!("{:.6}", count as f64 / 1_000_000.0)
-        } else {
-            count.to_string()
-        };
-
-        writeln!(
+        // Write feature metadata
+        write!(
             writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            gene_name,
-            chrom,
-            feature.start,
-            feature.end,
-            strand,
-            feature.len(),
-            count_str
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            gene_name, chrom, feature.start, feature.end, strand, feature.len()
         )?;
+
+        // Write counts for each sample
+        for sample_counts in &result.counts_per_sample {
+            let count = sample_counts.get(feat_idx).copied().unwrap_or(0);
+            let count_str = if args.fractional_counting {
+                format!("{:.6}", count as f64 / 1_000_000.0)
+            } else {
+                count.to_string()
+            };
+            write!(writer, "\t{}", count_str)?;
+        }
+        writeln!(writer)?;
     }
 
     Ok(())

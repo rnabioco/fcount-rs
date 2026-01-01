@@ -554,8 +554,7 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result =
-                process_bam_parallel(bam_path, args, annotation, count_size, tpf);
+            let result = process_bam_parallel(bam_path, args, annotation, count_size, tpf);
             pb.inc(1);
             pb.set_message(
                 bam_path
@@ -1143,13 +1142,7 @@ pub fn count_reads_parallel_paired(
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result = process_bam_parallel_paired(
-                bam_path,
-                args,
-                annotation,
-                count_size,
-                tpf,
-            );
+            let result = process_bam_parallel_paired(bam_path, args, annotation, count_size, tpf);
             pb.inc(1);
             pb.set_message(
                 bam_path

@@ -74,7 +74,7 @@ pub fn run_fcount(
         .arg(&output_path)
         .arg(bam_file)
         .arg("-q") // Quiet mode - no progress bar
-        .arg("-T")
+        .arg("-t")
         .arg("1"); // Single thread for reproducibility
 
     for arg in extra_args {
@@ -125,7 +125,7 @@ pub fn run_fcount_multi(
         .arg("-o")
         .arg(&output_path)
         .arg("-q")
-        .arg("-T")
+        .arg("-t")
         .arg("1");
 
     for arg in extra_args {

@@ -20,10 +20,6 @@ noodles-sam = "0.65"
 noodles-bgzf = { version = "0.33", features = ["libdeflate"] }
 noodles-core = "0.15"
 
-# GTF/GFF parsing (reuse rust-bio's battle-tested parser)
-bio = "2.0"
-bio-types = "1.0"
-
 # Parallelism
 rayon = "1.10"
 crossbeam = "0.8"

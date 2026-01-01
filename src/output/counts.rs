@@ -294,7 +294,12 @@ fn write_feature_level<W: Write>(
         write!(
             writer,
             "{}\t{}\t{}\t{}\t{}\t{}",
-            gene_name, chrom, feature.start, feature.end, strand, feature.len()
+            gene_name,
+            chrom,
+            feature.start,
+            feature.end,
+            strand,
+            feature.len()
         )?;
 
         // Write counts for each sample

@@ -749,7 +749,7 @@ fn process_paired_batch(
         if crate::alignment::minimal_parser::parse_bam_record(
             &data[data_start..data_end],
             record,
-            true, // need_read_name for paired-end
+            true,                     // need_read_name for paired-end
             args.count_multi_mapping, // Only parse NH if counting multi-mappers
         )
         .is_err()

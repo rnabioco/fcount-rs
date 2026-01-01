@@ -36,7 +36,11 @@ pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {
 
     // Reuse line buffer to avoid allocations per line
     let mut line_buf = String::with_capacity(1024);
-    while reader.read_line(&mut line_buf).context("Failed to read line")? > 0 {
+    while reader
+        .read_line(&mut line_buf)
+        .context("Failed to read line")?
+        > 0
+    {
         // Trim trailing newline
         let line = line_buf.trim_end();
 

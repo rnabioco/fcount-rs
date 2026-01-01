@@ -86,9 +86,8 @@ pub struct Args {
     pub bam_files: Vec<BamInput>,
 
     // ============ Feature Selection ============
-    /// Feature type to count (e.g., exon, gene)
+    /// Feature type to count (e.g., exon, gene). Auto-detected if default not found.
     #[arg(
-        short = 't',
         long = "type",
         default_value = "exon",
         help_heading = "Feature Selection"
@@ -194,7 +193,7 @@ pub struct Args {
     // ============ Performance ============
     /// Number of threads for parallel processing (0 = auto-detect)
     #[arg(
-        short = 'T',
+        short = 't',
         long = "threads",
         default_value = "0",
         help_heading = "Performance"
@@ -203,7 +202,7 @@ pub struct Args {
 
     // ============ Output Options ============
     /// Output detailed assignment per read (not yet implemented)
-    #[arg(short = 'R', long = "details", help_heading = "Output Options")]
+    #[arg(short = 'd', long = "details", help_heading = "Output Options")]
     pub details_file: Option<PathBuf>,
 
     /// Suppress progress output

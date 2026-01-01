@@ -4,11 +4,13 @@
 //! - Minimal allocations (reuses buffers)
 //! - Simple field splitting (no full GFF validation)
 //! - Only extracts fields we need
+//! - Auto-detection of feature types
 
 use anyhow::{Context, Result};
 use memchr::{memchr, memmem};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::BufRead;
+use std::path::Path;
 use std::sync::Arc;
 
 use super::feature::{Feature, Strand};
@@ -16,8 +18,79 @@ use super::index::AnnotationIndex;
 use super::io::open_reader;
 use crate::cli::Args;
 
-/// Parse a GTF file quickly, extracting only what we need
-pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {
+/// Scan a GTF/GFF file to detect available feature types.
+/// Reads up to `max_lines` non-comment lines for efficiency.
+pub fn detect_feature_types(path: &Path, max_lines: usize) -> Result<Vec<String>> {
+    let mut reader = open_reader(path)?;
+    let mut feature_types: FxHashSet<String> = FxHashSet::default();
+    let mut line_buf = String::with_capacity(1024);
+    let mut lines_read = 0;
+
+    while reader
+        .read_line(&mut line_buf)
+        .context("Failed to read line")?
+        > 0
+    {
+        let line = line_buf.trim_end();
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            line_buf.clear();
+            continue;
+        }
+
+        let bytes = line.as_bytes();
+
+        // Find field 2 (feature type) by locating tabs
+        // Fields: chrom(0), source(1), feature(2), ...
+        let mut tab_count = 0;
+        let mut field_start = 0;
+
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\t' {
+                tab_count += 1;
+                if tab_count == 2 {
+                    field_start = i + 1;
+                } else if tab_count == 3 {
+                    // Extract feature type
+                    if let Ok(feat_type) = std::str::from_utf8(&bytes[field_start..i]) {
+                        feature_types.insert(feat_type.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+
+        lines_read += 1;
+        if lines_read >= max_lines {
+            break;
+        }
+
+        line_buf.clear();
+    }
+
+    // Return sorted for consistent output
+    let mut types: Vec<String> = feature_types.into_iter().collect();
+    types.sort();
+    Ok(types)
+}
+
+/// Auto-select the best feature type based on detected types.
+/// Priority: exon > exonic_part > CDS > gene
+pub fn auto_select_feature_type(available: &[String]) -> Option<&str> {
+    const PREFERRED: &[&str] = &["exon", "exonic_part", "CDS", "gene"];
+
+    for &preferred in PREFERRED {
+        if available.iter().any(|t| t == preferred) {
+            return Some(preferred);
+        }
+    }
+    available.first().map(|s| s.as_str())
+}
+
+/// Parse a GTF file quickly, extracting only what we need.
+/// If `feature_type_override` is provided, it is used instead of `args.feature_type`.
+pub fn load_gtf_fast(args: &Args, feature_type_override: Option<&str>) -> Result<AnnotationIndex> {
     let mut reader = open_reader(&args.annotation)?;
 
     let mut chrom_to_id: FxHashMap<Arc<str>, u16> = FxHashMap::default();
@@ -26,7 +99,8 @@ pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {
     let mut gene_names: Vec<Arc<str>> = Vec::with_capacity(30_000); // ~genes
     let mut features: Vec<Feature> = Vec::with_capacity(500_000);
 
-    let feature_type = args.feature_type.as_bytes();
+    let feature_type_str = feature_type_override.unwrap_or(&args.feature_type);
+    let feature_type = feature_type_str.as_bytes();
     // GTF format: gene_id "value"
     let gtf_attr = format!("{} \"", args.gene_id_attr);
     let gtf_attr_bytes = gtf_attr.as_bytes();

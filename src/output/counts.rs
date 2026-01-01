@@ -69,7 +69,11 @@ fn write_counts_inner<W: Write>(
     writer: &mut BufWriter<W>,
 ) -> Result<()> {
     // Write comment line with program info (like featureCounts)
-    write!(writer, "# Program:fcount v{}; Command:", env!("CARGO_PKG_VERSION"))?;
+    write!(
+        writer,
+        "# Program:fcount v{}; Command:",
+        env!("CARGO_PKG_VERSION")
+    )?;
     write!(writer, "\"fcount\" ")?;
     write!(writer, "\"-a\" \"{}\" ", args.annotation.display())?;
     write!(writer, "\"-o\" \"{}\" ", args.output.display())?;
@@ -120,7 +124,10 @@ fn write_gene_level<W: Write>(
             .iter()
             .filter_map(|&idx| {
                 let chrom_id = annotation.features[idx].chrom_id;
-                annotation.id_to_chrom.get(chrom_id as usize).map(|s| s.as_ref())
+                annotation
+                    .id_to_chrom
+                    .get(chrom_id as usize)
+                    .map(|s| s.as_ref())
             })
             .collect();
         let chrom_str = chroms.join(";");

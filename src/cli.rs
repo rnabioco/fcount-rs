@@ -157,9 +157,9 @@ pub struct Args {
     pub quiet: bool,
 
     // ============ Not Yet Implemented ============
-    /// Count chimeric fragments (mates on different chromosomes) [NOT IMPLEMENTED]
-    #[arg(short = 'C', long = "count-chimeric", hide = true)]
-    pub count_chimeric: bool,
+    /// Do NOT count chimeric fragments (mates on different chromosomes)
+    #[arg(short = 'C', long = "no-chimeric", help_heading = "Paired-End Mode")]
+    pub no_chimeric: bool,
 }
 
 impl Args {

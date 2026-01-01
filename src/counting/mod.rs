@@ -95,11 +95,10 @@ pub fn count_reads(args: &Args, annotation: &AnnotationIndex) -> Result<CountRes
         stats_per_sample.push(stats);
     }
 
-    let aggregated = CountResult {
-        counts_per_sample: counts_per_sample.clone(),
-        stats_per_sample: stats_per_sample.clone(),
+    let mut aggregated = ReadCounters::default();
+    for s in &stats_per_sample {
+        aggregated.merge(s);
     }
-    .aggregated_stats();
 
     debug!(
         "Total: {} assigned, {} unassigned",
@@ -203,12 +202,30 @@ fn process_single_read(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
+    use crate::cli::StrandMode;
+
     let chrom_id = match record.chrom_id {
         Some(id) => id,
         None => {
             counter.stats.unassigned_no_features += 1;
             return;
         }
+    };
+
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        record.intervals.iter().map(|i| i.len()).sum()
+    } else {
+        0
+    };
+
+    // Precompute expected strand once
+    let expected_strand = match args.strand_mode() {
+        StrandMode::Unstranded => None,
+        mode => Some(overlap::apply_strand_mode(
+            overlap::strand_from_reverse(record.is_reverse_strand()),
+            mode,
+        )),
     };
 
     // Find overlapping features using callback-based query (no allocation)
@@ -220,7 +237,7 @@ fn process_single_read(
             interval.end,
             |feat_idx, feature| {
                 // Check strand if stranded mode
-                if !overlap::check_strand(record, feature, args) {
+                if !overlap::check_strand_fast(expected_strand, feature.strand) {
                     return;
                 }
 
@@ -232,8 +249,7 @@ fn process_single_read(
                 };
 
                 // Check minimum overlap
-                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
-                {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -313,6 +329,8 @@ fn process_fragment(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
+    use crate::cli::StrandMode;
+
     let chrom_id = match record.chrom_id {
         Some(id) => id,
         None => {
@@ -320,6 +338,16 @@ fn process_fragment(
             return;
         }
     };
+
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        record.intervals.iter().map(|i| i.len()).sum()
+    } else {
+        0
+    };
+
+    // Check if unstranded mode (skip strand checks entirely)
+    let is_unstranded = args.strand_mode() == StrandMode::Unstranded;
 
     // Collect hits from both mates using callback-based query (no allocation)
     counter.hit_buffer.clear();
@@ -331,7 +359,7 @@ fn process_fragment(
             interval.start,
             interval.end,
             |feat_idx, feature| {
-                if !overlap::check_strand_paired(record, mate, feature, args) {
+                if !is_unstranded && !overlap::check_strand_paired(record, mate, feature, args) {
                     return;
                 }
 
@@ -346,8 +374,7 @@ fn process_fragment(
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
-                {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -362,9 +389,11 @@ fn process_fragment(
 
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
-        // Build set of already-seen features for O(1) duplicate check
-        let seen_features: rustc_hash::FxHashSet<u32> =
-            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
+        // Build set of already-seen features for O(1) duplicate check (reusing allocated set)
+        counter.seen_features.clear();
+        counter
+            .seen_features
+            .extend(counter.hit_buffer.iter().map(|h| h.feature_idx));
 
         for interval in &mate.intervals {
             annotation.query_overlapping(
@@ -373,11 +402,12 @@ fn process_fragment(
                 interval.end,
                 |feat_idx, feature| {
                     // Skip if already counted - O(1) lookup
-                    if seen_features.contains(&feat_idx) {
+                    if counter.seen_features.contains(&feat_idx) {
                         return;
                     }
 
-                    if !overlap::check_strand_paired(record, mate, feature, args) {
+                    if !is_unstranded && !overlap::check_strand_paired(record, mate, feature, args)
+                    {
                         return;
                     }
 
@@ -395,12 +425,7 @@ fn process_fragment(
                         1
                     };
 
-                    if !overlap::check_overlap_thresholds(
-                        overlap_len,
-                        &record.intervals,
-                        feature,
-                        args,
-                    ) {
+                    if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                         return;
                     }
 
@@ -426,6 +451,24 @@ fn process_orphan_mate(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
+    use crate::cli::StrandMode;
+
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        mate.intervals.iter().map(|i| i.len()).sum()
+    } else {
+        0
+    };
+
+    // Precompute expected strand once
+    let expected_strand = match args.strand_mode() {
+        StrandMode::Unstranded => None,
+        mode => Some(overlap::apply_strand_mode(
+            overlap::strand_from_reverse(mate.is_reverse_strand()),
+            mode,
+        )),
+    };
+
     counter.hit_buffer.clear();
 
     for interval in &mate.intervals {
@@ -435,12 +478,7 @@ fn process_orphan_mate(
             interval.end,
             |feat_idx, feature| {
                 // Check strand
-                let mate_strand = if mate.is_reverse_strand() {
-                    crate::annotation::Strand::Reverse
-                } else {
-                    crate::annotation::Strand::Forward
-                };
-                if !overlap::check_strand_with_strand(mate_strand, feature, args) {
+                if !overlap::check_strand_fast(expected_strand, feature.strand) {
                     return;
                 }
 
@@ -450,7 +488,7 @@ fn process_orphan_mate(
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(overlap_len, &mate.intervals, feature, args) {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -593,11 +631,10 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         stats_per_sample.push(stats);
     }
 
-    let aggregated = CountResult {
-        counts_per_sample: counts_per_sample.clone(),
-        stats_per_sample: stats_per_sample.clone(),
+    let mut aggregated = ReadCounters::default();
+    for s in &stats_per_sample {
+        aggregated.merge(s);
     }
-    .aggregated_stats();
 
     debug!(
         "Total: {} assigned, {} unassigned",
@@ -871,13 +908,25 @@ fn process_minimal_single_read(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
-    counter.hit_buffer.clear();
+    use crate::cli::StrandMode;
 
-    let record_strand = if record.is_reverse() {
-        crate::annotation::Strand::Reverse
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        record.intervals.iter().map(|i| i.len()).sum()
     } else {
-        crate::annotation::Strand::Forward
+        0
     };
+
+    // Precompute expected strand once
+    let expected_strand = match args.strand_mode() {
+        StrandMode::Unstranded => None,
+        mode => Some(overlap::apply_strand_mode(
+            overlap::strand_from_reverse(record.is_reverse()),
+            mode,
+        )),
+    };
+
+    counter.hit_buffer.clear();
 
     for interval in &record.intervals {
         // Use callback-based query to avoid allocation
@@ -886,7 +935,7 @@ fn process_minimal_single_read(
             interval.start,
             interval.end,
             |feat_idx, feature| {
-                if !overlap::check_strand_with_strand(record_strand, feature, args) {
+                if !overlap::check_strand_fast(expected_strand, feature.strand) {
                     return;
                 }
 
@@ -896,8 +945,7 @@ fn process_minimal_single_read(
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
-                {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -923,6 +971,18 @@ fn process_minimal_fragment(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
+    use crate::cli::StrandMode;
+
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        record.intervals.iter().map(|i| i.len()).sum()
+    } else {
+        0
+    };
+
+    // Check if unstranded mode (skip strand checks entirely)
+    let is_unstranded = args.strand_mode() == StrandMode::Unstranded;
+
     counter.hit_buffer.clear();
 
     let record_strand = if record.is_reverse() {
@@ -944,12 +1004,14 @@ fn process_minimal_fragment(
             interval.start,
             interval.end,
             |feat_idx, feature| {
-                if !overlap::check_strand_paired_with_strands(
-                    record_strand,
-                    mate_strand,
-                    feature,
-                    args,
-                ) {
+                if !is_unstranded
+                    && !overlap::check_strand_paired_with_strands(
+                        record_strand,
+                        mate_strand,
+                        feature,
+                        args,
+                    )
+                {
                     return;
                 }
 
@@ -964,8 +1026,7 @@ fn process_minimal_fragment(
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
-                {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -980,9 +1041,11 @@ fn process_minimal_fragment(
 
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
-        // Build set of already-seen features for O(1) duplicate check
-        let seen_features: rustc_hash::FxHashSet<u32> =
-            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
+        // Build set of already-seen features for O(1) duplicate check (reusing allocated set)
+        counter.seen_features.clear();
+        counter
+            .seen_features
+            .extend(counter.hit_buffer.iter().map(|h| h.feature_idx));
 
         for interval in &mate.intervals {
             annotation.query_overlapping(
@@ -991,16 +1054,18 @@ fn process_minimal_fragment(
                 interval.end,
                 |feat_idx, feature| {
                     // Skip if already counted - O(1) lookup
-                    if seen_features.contains(&feat_idx) {
+                    if counter.seen_features.contains(&feat_idx) {
                         return;
                     }
 
-                    if !overlap::check_strand_paired_with_strands(
-                        record_strand,
-                        mate_strand,
-                        feature,
-                        args,
-                    ) {
+                    if !is_unstranded
+                        && !overlap::check_strand_paired_with_strands(
+                            record_strand,
+                            mate_strand,
+                            feature,
+                            args,
+                        )
+                    {
                         return;
                     }
 
@@ -1018,12 +1083,7 @@ fn process_minimal_fragment(
                         1
                     };
 
-                    if !overlap::check_overlap_thresholds(
-                        overlap_len,
-                        &record.intervals,
-                        feature,
-                        args,
-                    ) {
+                    if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                         return;
                     }
 
@@ -1049,13 +1109,24 @@ fn process_deferred_as_single(
     annotation: &AnnotationIndex,
     args: &Args,
 ) {
+    use crate::cli::StrandMode;
+
     let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(64);
 
-    // Precompute strand once
-    let deferred_strand = if deferred.is_reverse_strand() {
-        crate::annotation::Strand::Reverse
+    // Precompute read_len once (only needed if min_overlap_fraction > 0)
+    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
+        deferred.intervals.iter().map(|i| i.len()).sum()
     } else {
-        crate::annotation::Strand::Forward
+        0
+    };
+
+    // Precompute expected strand once
+    let expected_strand = match args.strand_mode() {
+        StrandMode::Unstranded => None,
+        mode => Some(overlap::apply_strand_mode(
+            overlap::strand_from_reverse(deferred.is_reverse_strand()),
+            mode,
+        )),
     };
 
     for interval in &deferred.intervals {
@@ -1064,7 +1135,7 @@ fn process_deferred_as_single(
             interval.start,
             interval.end,
             |feat_idx, feature| {
-                if !overlap::check_strand_with_strand(deferred_strand, feature, args) {
+                if !overlap::check_strand_fast(expected_strand, feature.strand) {
                     return;
                 }
 
@@ -1074,12 +1145,7 @@ fn process_deferred_as_single(
                     1
                 };
 
-                if !overlap::check_overlap_thresholds(
-                    overlap_len,
-                    &deferred.intervals,
-                    feature,
-                    args,
-                ) {
+                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
                     return;
                 }
 
@@ -1187,11 +1253,10 @@ pub fn count_reads_parallel_paired(
         stats_per_sample.push(stats);
     }
 
-    let aggregated = CountResult {
-        counts_per_sample: counts_per_sample.clone(),
-        stats_per_sample: stats_per_sample.clone(),
+    let mut aggregated = ReadCounters::default();
+    for s in &stats_per_sample {
+        aggregated.merge(s);
     }
-    .aggregated_stats();
 
     debug!(
         "Parallel paired: {} assigned, {} unassigned",

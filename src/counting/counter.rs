@@ -41,6 +41,8 @@ pub struct ThreadCounter {
     pub stats: ReadCounters,
     /// Buffer for collecting feature hits (reused to avoid allocation)
     pub hit_buffer: Vec<FeatureHit>,
+    /// Reusable set for tracking seen features during fragment deduplication
+    pub seen_features: rustc_hash::FxHashSet<u32>,
     /// Whether we're using fractional counting
     use_fractional: bool,
     /// Whether we're counting at feature level
@@ -55,6 +57,7 @@ impl ThreadCounter {
             counts: vec![0; size],
             stats: ReadCounters::default(),
             hit_buffer: Vec::with_capacity(64),
+            seen_features: rustc_hash::FxHashSet::default(),
             use_fractional: args.fractional_counting,
             feature_level: args.feature_level,
             timing: TimingStats::default(),

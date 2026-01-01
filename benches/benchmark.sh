@@ -23,11 +23,11 @@ FULL_BAM="/beevol/home/jhessel/devel/rnabioco/nmd-exons/results/align/bam/HELA-s
 regenerate_tests() {
     echo "Regenerating test files from chr22..."
     grep "^chr22" "$FULL_GTF" > "$TEST_GTF"
-    samtools view -b "$FULL_BAM" chr22 > "$TEST_BAM"
-    samtools index "$TEST_BAM"
+    pixi run samtools view -b "$FULL_BAM" chr22 > "$TEST_BAM"
+    pixi run samtools index "$TEST_BAM"
     echo "Created:"
     echo "  GTF: $TEST_GTF ($(wc -l < $TEST_GTF) lines)"
-    echo "  BAM: $TEST_BAM ($(samtools view -c $TEST_BAM) reads)"
+    echo "  BAM: $TEST_BAM ($(pixi run samtools view -c $TEST_BAM) reads)"
 }
 
 # Build release binary
@@ -62,20 +62,8 @@ run_benchmarks() {
         exit 1
     fi
 
-    # Use pixi run for featureCounts if available
-    local FC_CMD="featureCounts"
-    if ! command -v featureCounts &> /dev/null; then
-        if [[ -f "pixi.toml" ]]; then
-            FC_CMD="pixi run featureCounts"
-        else
-            echo "featureCounts not found"
-            echo "Running fcount-rs only..."
-            hyperfine --warmup 1 --runs 5 \
-                -n "fcount-rs-1t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -T 1" \
-                -n "fcount-rs-8t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -T 8"
-            return
-        fi
-    fi
+    # Always use pixi run for featureCounts
+    local FC_CMD="pixi run featureCounts"
 
     echo "Comparing fcount-rs vs featureCounts..."
 

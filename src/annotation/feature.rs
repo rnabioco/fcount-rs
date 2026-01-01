@@ -46,7 +46,7 @@ pub struct Feature {
 
 impl Feature {
     /// Calculate the length of this feature in bases
-    #[inline]
+    #[inline(always)]
     pub fn len(&self) -> u32 {
         self.end - self.start + 1
     }

@@ -48,11 +48,14 @@ impl ShardedMateTracker {
     /// Create a new mate tracker.
     ///
     /// # Arguments
-    /// * `_num_shards` - Ignored (DashMap handles sharding internally)
-    pub fn new(_num_shards: usize) -> Self {
-        // DashMap automatically shards based on available parallelism
+    /// * `num_shards` - Number of shards for the DashMap (minimum 16)
+    pub fn new(num_shards: usize) -> Self {
         ShardedMateTracker {
-            map: DashMap::with_hasher(BuildHasherDefault::<FxHasher>::default()),
+            map: DashMap::with_capacity_and_hasher_and_shard_amount(
+                100_000,
+                BuildHasherDefault::<FxHasher>::default(),
+                num_shards.max(16),
+            ),
         }
     }
 

@@ -6,40 +6,15 @@
 //! - Only extracts fields we need
 
 use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
 use memchr::memchr;
 use rustc_hash::FxHashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::BufRead;
 use std::sync::Arc;
 
 use super::feature::{Feature, Strand};
 use super::index::AnnotationIndex;
+use super::io::open_reader;
 use crate::cli::Args;
-
-/// Check if a file is gzip-compressed by reading magic bytes
-fn is_gzipped(file: &mut File) -> std::io::Result<bool> {
-    use std::io::{Seek, SeekFrom};
-    let mut magic = [0u8; 2];
-    let n = file.read(&mut magic)?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok(n == 2 && magic == [0x1f, 0x8b])
-}
-
-/// Create a buffered reader, auto-detecting gzip compression
-fn open_reader(path: &std::path::Path) -> Result<Box<dyn BufRead>> {
-    let mut file =
-        File::open(path).with_context(|| format!("Failed to open: {}", path.display()))?;
-
-    if is_gzipped(&mut file)? {
-        Ok(Box::new(BufReader::with_capacity(
-            1024 * 1024,
-            GzDecoder::new(file),
-        )))
-    } else {
-        Ok(Box::new(BufReader::with_capacity(1024 * 1024, file)))
-    }
-}
 
 /// Parse a GTF file quickly, extracting only what we need
 pub fn load_gtf_fast(args: &Args) -> Result<AnnotationIndex> {

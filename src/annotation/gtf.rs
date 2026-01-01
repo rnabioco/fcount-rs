@@ -1,41 +1,15 @@
 use anyhow::{Context, Result};
 use bio::io::gff::{self, GffType};
 use bio_types::strand::Strand as BioStrand;
-use flate2::read::GzDecoder;
 use log::debug;
 use rustc_hash::FxHashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 
 use super::feature::{Feature, Strand};
 use super::index::AnnotationIndex;
+use super::io::open_reader;
 use crate::cli::Args;
-
-/// Check if a file is gzip-compressed by reading magic bytes
-fn is_gzipped(file: &mut File) -> std::io::Result<bool> {
-    use std::io::{Seek, SeekFrom};
-    let mut magic = [0u8; 2];
-    let n = file.read(&mut magic)?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok(n == 2 && magic == [0x1f, 0x8b])
-}
-
-/// Create a buffered reader, auto-detecting gzip compression
-fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
-    let mut file =
-        File::open(path).with_context(|| format!("Failed to open: {}", path.display()))?;
-
-    if is_gzipped(&mut file)? {
-        Ok(Box::new(BufReader::with_capacity(
-            1024 * 1024,
-            GzDecoder::new(file),
-        )))
-    } else {
-        Ok(Box::new(BufReader::with_capacity(1024 * 1024, file)))
-    }
-}
 
 /// Detect GFF type from filename (handles .gz suffix)
 fn detect_gff_type(path: &Path) -> GffType {

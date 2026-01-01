@@ -2,6 +2,7 @@ mod fast_gtf;
 mod feature;
 mod gtf;
 mod index;
+pub mod io;
 
 pub use feature::{Feature, Strand};
 pub use index::AnnotationIndex;

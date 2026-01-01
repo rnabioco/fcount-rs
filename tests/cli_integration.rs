@@ -63,7 +63,7 @@ fn test_intron_between() {
 #[test]
 fn test_junction_reads() {
     let result = run_fcount(
-        &fixture_path("corner-JUNC.sam"),
+        &fixture_path("corner-JUNC.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -80,7 +80,7 @@ fn test_junction_reads() {
 #[test]
 fn test_paired_end_basic() {
     let result = run_fcount(
-        &fixture_path("corner-ONEEND.sam"),
+        &fixture_path("corner-ONEEND.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -93,7 +93,7 @@ fn test_paired_end_basic() {
 #[test]
 fn test_paired_end_require_both_aligned() {
     let result = run_fcount(
-        &fixture_path("corner-ONEEND.sam"),
+        &fixture_path("corner-ONEEND.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p", "-B"],
     )
@@ -110,7 +110,7 @@ fn test_paired_end_require_both_aligned() {
 #[test]
 fn test_multimapper_nh_tag() {
     let result = run_fcount(
-        &fixture_path("corner-NH.sam"),
+        &fixture_path("corner-NH.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -124,7 +124,7 @@ fn test_multimapper_nh_tag() {
 #[test]
 fn test_multimapper_primary_only() {
     let result = run_fcount(
-        &fixture_path("corner-NH.sam"),
+        &fixture_path("corner-NH.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p", "-M", "--primary"],
     )
@@ -211,7 +211,7 @@ fn test_min_mapping_quality() {
 #[test]
 fn test_ignore_duplicates() {
     let result = run_fcount(
-        &fixture_path("test-dup.sam"),
+        &fixture_path("test-dup.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p", "--ignore-dup"],
     )
@@ -228,7 +228,7 @@ fn test_ignore_duplicates() {
 #[test]
 fn test_indel_reads() {
     let result = run_fcount(
-        &fixture_path("corner-INDEL.sam"),
+        &fixture_path("corner-INDEL.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -245,7 +245,7 @@ fn test_indel_reads() {
 #[test]
 fn test_output_has_correct_columns() {
     let result = run_fcount(
-        &fixture_path("corner-JUNC.sam"),
+        &fixture_path("corner-JUNC.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -278,7 +278,7 @@ fn test_output_has_correct_columns() {
 #[test]
 fn test_output_has_program_comment() {
     let result = run_fcount(
-        &fixture_path("corner-JUNC.sam"),
+        &fixture_path("corner-JUNC.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )
@@ -306,7 +306,7 @@ fn test_output_has_program_comment() {
 #[test]
 fn test_summary_file_created() {
     let result = run_fcount(
-        &fixture_path("corner-JUNC.sam"),
+        &fixture_path("corner-JUNC.bam"),
         &fixture_path("test-minimum.GTF"),
         &["-p"],
     )

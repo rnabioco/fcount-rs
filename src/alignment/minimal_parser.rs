@@ -44,7 +44,7 @@ pub struct MinimalRecord {
     /// Mapping quality
     pub mapq: u8,
     /// Genomic intervals from CIGAR
-    pub intervals: SmallVec<[Interval; 4]>,
+    pub intervals: SmallVec<[Interval; 8]>,
     /// NH tag value (number of alignments, 1 if not present)
     pub nh: u8,
     /// Mate reference ID (for paired-end)
@@ -242,7 +242,7 @@ pub fn parse_bam_record(
 
 /// Parse raw CIGAR ops into genomic intervals
 #[inline]
-fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interval; 4]>) {
+fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interval; 8]>) {
     out.clear();
 
     if start_pos < 0 {

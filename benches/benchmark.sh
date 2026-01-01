@@ -70,8 +70,8 @@ run_benchmarks() {
     hyperfine --warmup 1 --runs 5 \
         -n "featureCounts-1t" "$FC_CMD -a $gtf -o /tmp/fc_out.txt -p -T 1 $bam 2>/dev/null" \
         -n "featureCounts-8t" "$FC_CMD -a $gtf -o /tmp/fc_out.txt -p -T 8 $bam 2>/dev/null" \
-        -n "fcount-rs-1t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -T 1" \
-        -n "fcount-rs-8t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -T 8" \
+        -n "fcount-rs-1t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -t 1" \
+        -n "fcount-rs-8t" "$FCOUNT_RS -a $gtf -o $TEST_OUTPUT -p $bam -t 8" \
         --export-markdown /tmp/benchmark_results.md
 
     echo ""

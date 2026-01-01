@@ -740,7 +740,8 @@ fn process_bam_parallel_paired(
             debug!("{} orphan mates remaining after processing", orphans.len());
             // These are singletons - we could count them if require_both_aligned is false
             if !args.require_both_aligned {
-                // Process orphans as single-end reads
+                // Process orphans as single-end reads (reuse hit_buffer)
+                let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(8);
                 for (_hash, deferred) in orphans {
                     process_deferred_as_single(
                         &deferred,
@@ -748,6 +749,7 @@ fn process_bam_parallel_paired(
                         &mut final_stats,
                         annotation,
                         args,
+                        &mut hit_buffer,
                     );
                 }
             } else {
@@ -1108,10 +1110,11 @@ fn process_deferred_as_single(
     stats: &mut ReadCounters,
     annotation: &AnnotationIndex,
     args: &Args,
+    hit_buffer: &mut Vec<overlap::FeatureHit>,
 ) {
     use crate::cli::StrandMode;
 
-    let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(64);
+    hit_buffer.clear();
 
     // Precompute read_len once (only needed if min_overlap_fraction > 0)
     let read_len: u32 = if args.min_overlap_fraction > 0.0 {

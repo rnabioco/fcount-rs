@@ -480,7 +480,10 @@ fn process_bam_parallel(
 
     // Open BAM reader with specified threads for decompression
     let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, threads_per_file)?;
-    let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
+
+    // Pre-create Arc before spawning workers (avoids N clones of underlying data)
+    let ref_to_chrom_arc = Arc::new(reader.ref_to_chrom().to_vec());
+    let args_arc = Arc::new(args.clone());
 
     // Number of worker threads
     let num_workers = threads_per_file.max(1);
@@ -494,11 +497,10 @@ fn process_bam_parallel(
         let worker_handles: Vec<_> = (0..num_workers)
             .map(|_| {
                 let rx = rx.clone();
-                let ref_to_chrom = &ref_to_chrom;
+                let ref_to_chrom_arc = Arc::clone(&ref_to_chrom_arc); // Cheap Arc clone
+                let args_arc = Arc::clone(&args_arc); // Cheap Arc clone
 
                 scope.spawn(move |_| {
-                    let ref_to_chrom_arc = Arc::new(ref_to_chrom.to_vec());
-                    let args_arc = Arc::new(args.clone());
                     let mut worker = Worker::new(count_size, ref_to_chrom_arc, args_arc);
 
                     // Process batches until channel closes
@@ -747,7 +749,8 @@ fn process_paired_batch(
         if crate::alignment::minimal_parser::parse_bam_record(
             &data[data_start..data_end],
             record,
-            true,
+            true, // need_read_name for paired-end
+            args.count_multi_mapping, // Only parse NH if counting multi-mappers
         )
         .is_err()
         {
@@ -1037,7 +1040,7 @@ fn process_deferred_as_single(
     annotation: &AnnotationIndex,
     args: &Args,
 ) {
-    let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(16);
+    let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(64);
 
     // Precompute strand once
     let deferred_strand = if deferred.is_reverse_strand() {

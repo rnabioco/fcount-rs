@@ -44,7 +44,7 @@ impl Worker {
         Worker {
             counts: vec![0i64; count_size],
             stats: ReadCounters::default(),
-            hit_buffer: Vec::with_capacity(16),
+            hit_buffer: Vec::with_capacity(64),
             record: MinimalRecord::new(),
             ref_to_chrom,
             args,
@@ -73,10 +73,12 @@ impl Worker {
             }
 
             // Parse this record
+            // Only parse NH tag if we need it for multi-mapper filtering
             if parse_bam_record(
                 &data[data_start..data_end],
                 &mut self.record,
                 need_read_name,
+                self.args.count_multi_mapping, // Only parse NH if counting multi-mappers
             )
             .is_ok()
             {

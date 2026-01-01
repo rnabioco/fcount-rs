@@ -165,6 +165,7 @@ pub fn parse_bam_record(
     data: &[u8],
     record: &mut MinimalRecord,
     need_read_name: bool,
+    need_nh_tag: bool,
 ) -> Result<(), &'static str> {
     // Minimum BAM record size: 32 bytes fixed header + 1 byte read name (null)
     if data.len() < 33 {
@@ -226,14 +227,15 @@ pub fn parse_bam_record(
         &mut record.intervals,
     );
 
-    // Aux data starts after seq and qual
-    let seq_len = l_seq.div_ceil(2);
-    let aux_start = cigar_end + seq_len + l_seq;
-
-    // Parse NH tag from aux data
-    if aux_start < data.len() {
-        record.nh = find_nh_tag(&data[aux_start..]).unwrap_or(1);
+    // Parse NH tag from aux data only if needed (for multi-mapper filtering)
+    if need_nh_tag {
+        let seq_len = l_seq.div_ceil(2);
+        let aux_start = cigar_end + seq_len + l_seq;
+        if aux_start < data.len() {
+            record.nh = find_nh_tag(&data[aux_start..]).unwrap_or(1);
+        }
     }
+    // Otherwise nh stays at default value of 1 (set in clear())
 
     Ok(())
 }

@@ -239,6 +239,7 @@ impl BamBlockReader {
     pub fn parse_batch_records<F>(
         batch: &RecordBatch,
         need_read_name: bool,
+        need_nh_tag: bool,
         record: &mut MinimalRecord,
         mut callback: F,
     ) where
@@ -261,7 +262,9 @@ impl BamBlockReader {
             }
 
             // Parse this record
-            if parse_bam_record(&data[data_start..data_end], record, need_read_name).is_ok() {
+            if parse_bam_record(&data[data_start..data_end], record, need_read_name, need_nh_tag)
+                .is_ok()
+            {
                 callback(record);
             }
 
@@ -276,15 +279,17 @@ pub struct BatchRecordIter<'a> {
     offset: usize,
     record: MinimalRecord,
     need_read_name: bool,
+    need_nh_tag: bool,
 }
 
 impl<'a> BatchRecordIter<'a> {
-    pub fn new(batch: &'a RecordBatch, need_read_name: bool) -> Self {
+    pub fn new(batch: &'a RecordBatch, need_read_name: bool, need_nh_tag: bool) -> Self {
         BatchRecordIter {
             data: &batch.data,
             offset: 0,
             record: MinimalRecord::new(),
             need_read_name,
+            need_nh_tag,
         }
     }
 }
@@ -314,6 +319,7 @@ impl<'a> Iterator for BatchRecordIter<'a> {
             &self.data[data_start..data_end],
             &mut self.record,
             self.need_read_name,
+            self.need_nh_tag,
         )
         .is_ok()
         {

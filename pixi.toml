@@ -1,4 +1,4 @@
-[project]
+[workspace]
 name = "fcount-rs"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]

@@ -45,6 +45,8 @@ env_logger = "0.11"
 parking_lot = "0.12.5"
 coitrees = "0.4.0"
 memchr = "2.7.6"
+indicatif = { version = "0.18.3", features = ["rayon"] }
+flate2 = "1.1.5"
 
 [profile.release]
 lto = true

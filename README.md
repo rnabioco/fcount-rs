@@ -6,6 +6,19 @@
 
 Ultrafast feature counting for RNA-seq data. A high-performance Rust alternative to featureCounts.
 
+## Performance
+
+fcount-rs is significantly faster than featureCounts, especially with multiple threads:
+
+| Command | Mean [s] | Relative |
+|:---|---:|---:|
+| featureCounts (1 thread) | 3.34 ± 0.25 | 4.69× slower |
+| featureCounts (8 threads) | 1.45 ± 0.03 | 2.03× slower |
+| fcount-rs (1 thread) | 2.26 ± 0.34 | 3.18× slower |
+| **fcount-rs (8 threads)** | **0.71 ± 0.02** | **1.00** |
+
+*Benchmark: chr22 subset (~1.4M paired-end reads), measured with [hyperfine](https://github.com/sharkdp/hyperfine). featureCounts v2.1.1.*
+
 ## Installation
 
 ```bash

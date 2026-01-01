@@ -25,16 +25,21 @@ impl Strand {
 }
 
 /// A genomic feature (exon, gene, etc.)
+///
+/// Fields are ordered for optimal memory layout (16 bytes instead of 20):
+/// - 4-byte aligned fields first (start, end, gene_id)
+/// - Then 2-byte field (chrom_id)
+/// - Then 1-byte field (strand) with 1 byte padding
 #[derive(Debug, Clone)]
 pub struct Feature {
-    /// Index into the gene_names vector
-    pub gene_id: u32,
-    /// Index into the chromosome name vector
-    pub chrom_id: u16,
     /// 1-based start position (inclusive)
     pub start: u32,
     /// 1-based end position (inclusive)
     pub end: u32,
+    /// Index into the gene_names vector
+    pub gene_id: u32,
+    /// Index into the chromosome name vector
+    pub chrom_id: u16,
     /// Feature strand
     pub strand: Strand,
 }

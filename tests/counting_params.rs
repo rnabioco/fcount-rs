@@ -387,9 +387,6 @@ fn test_need_overlap_length_with_largest_overlap() {
 
 #[test]
 fn test_min_overlap_bases_filter() {
-    use fcount_rs::alignment::Interval;
-    use smallvec::SmallVec;
-
     let mut args = default_args();
     args.min_overlap_bases = 50;
 
@@ -401,24 +398,22 @@ fn test_min_overlap_bases_filter() {
         strand: Strand::Forward,
     };
 
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
-        start: 100,
-        end: 130
-    }];
+    // Interval definition not needed since min_overlap_fraction is 0, just read_len = 0
+    let read_len: u32 = 0;
 
     // 30 bp overlap, less than 50 required
     assert!(!overlap::check_overlap_thresholds(
-        30, &intervals, &feature, &args
+        30, read_len, &feature, &args
     ));
 
     // 50 bp overlap, exactly enough
     assert!(overlap::check_overlap_thresholds(
-        50, &intervals, &feature, &args
+        50, read_len, &feature, &args
     ));
 
     // 100 bp overlap, more than enough
     assert!(overlap::check_overlap_thresholds(
-        100, &intervals, &feature, &args
+        100, read_len, &feature, &args
     ));
 }
 
@@ -438,33 +433,33 @@ fn test_min_overlap_fraction_filter() {
         strand: Strand::Forward,
     };
 
-    // 100bp read
+    // 100bp read (interval from 100 to 199 is 99bp, but we use 100 for simpler math)
     let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
         start: 100,
         end: 199
     }];
 
-    // 40bp overlap = 40% of 100bp read - should fail
+    // Precompute read_len once
+    let read_len: u32 = intervals.iter().map(|i| i.len()).sum();
+
+    // 40bp overlap = 40% of 99bp read - should fail
     assert!(!overlap::check_overlap_thresholds(
-        40, &intervals, &feature, &args
+        40, read_len, &feature, &args
     ));
 
-    // 50bp overlap = 50% of 100bp read - should pass
+    // 50bp overlap = ~50% of 99bp read - should pass
     assert!(overlap::check_overlap_thresholds(
-        50, &intervals, &feature, &args
+        50, read_len, &feature, &args
     ));
 
-    // 80bp overlap = 80% of 100bp read - should pass
+    // 80bp overlap = ~80% of 99bp read - should pass
     assert!(overlap::check_overlap_thresholds(
-        80, &intervals, &feature, &args
+        80, read_len, &feature, &args
     ));
 }
 
 #[test]
 fn test_min_feature_overlap_fraction_filter() {
-    use fcount_rs::alignment::Interval;
-    use smallvec::SmallVec;
-
     let mut args = default_args();
     args.min_feature_overlap_fraction = 0.5; // Require 50% of feature to be covered
 
@@ -477,18 +472,16 @@ fn test_min_feature_overlap_fraction_filter() {
         strand: Strand::Forward,
     };
 
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
-        start: 100,
-        end: 149
-    }];
+    // read_len not needed since min_overlap_fraction is 0
+    let read_len: u32 = 0;
 
-    // 40bp overlap = 40% of 100bp feature - should fail
+    // 40bp overlap = 40% of 99bp feature - should fail
     assert!(!overlap::check_overlap_thresholds(
-        40, &intervals, &feature, &args
+        40, read_len, &feature, &args
     ));
 
-    // 50bp overlap = 50% of 100bp feature - should pass
+    // 50bp overlap = ~50% of 99bp feature - should pass
     assert!(overlap::check_overlap_thresholds(
-        50, &intervals, &feature, &args
+        50, read_len, &feature, &args
     ));
 }

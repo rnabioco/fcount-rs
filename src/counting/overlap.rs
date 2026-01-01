@@ -1,7 +1,7 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use crate::alignment::{AlignmentRecord, Interval, PendingMate};
+use crate::alignment::{AlignmentRecord, PendingMate};
 use crate::annotation::{Feature, Strand};
 use crate::cli::{Args, StrandMode};
 
@@ -37,8 +37,8 @@ pub enum Assignment {
 ///
 /// This is the core strand logic used by all strand checking functions.
 /// Given a read strand and strand mode, returns the expected feature strand.
-#[inline]
-fn apply_strand_mode(read_strand: Strand, mode: StrandMode) -> Strand {
+#[inline(always)]
+pub fn apply_strand_mode(read_strand: Strand, mode: StrandMode) -> Strand {
     match mode {
         StrandMode::Unstranded => Strand::Unknown, // Any strand matches
         StrandMode::Stranded => read_strand,
@@ -53,7 +53,7 @@ fn apply_strand_mode(read_strand: Strand, mode: StrandMode) -> Strand {
 /// Check if a read/fragment strand is compatible with a feature strand.
 ///
 /// This is the unified strand compatibility check used by all strand functions.
-#[inline]
+#[inline(always)]
 fn is_strand_compatible(expected_strand: Strand, feature_strand: Strand) -> bool {
     // Unknown feature strand always matches
     if feature_strand == Strand::Unknown {
@@ -68,12 +68,22 @@ fn is_strand_compatible(expected_strand: Strand, feature_strand: Strand) -> bool
 }
 
 /// Get the strand from a boolean reverse flag.
-#[inline]
+#[inline(always)]
 pub fn strand_from_reverse(is_reverse: bool) -> Strand {
     if is_reverse {
         Strand::Reverse
     } else {
         Strand::Forward
+    }
+}
+
+/// Fast strand check with precomputed expected strand.
+/// For unstranded mode, pass None to skip the check entirely.
+#[inline(always)]
+pub fn check_strand_fast(expected: Option<Strand>, feature_strand: Strand) -> bool {
+    match expected {
+        None => true, // Unstranded - always matches
+        Some(exp) => is_strand_compatible(exp, feature_strand),
     }
 }
 
@@ -129,7 +139,7 @@ pub fn check_strand_paired(
 }
 
 /// Check strand compatibility using Strand enum directly (for parallel processing).
-#[inline]
+#[inline(always)]
 pub fn check_strand_with_strand(read_strand: Strand, feature: &Feature, args: &Args) -> bool {
     let expected = apply_strand_mode(read_strand, args.strand_mode());
     is_strand_compatible(expected, feature.strand)
@@ -204,10 +214,13 @@ pub fn check_strand_paired_with_strands_ex(
         || is_strand_compatible(expected_mate, feature.strand)
 }
 
-/// Check if overlap meets threshold requirements
+/// Check if overlap meets threshold requirements.
+/// `read_len` should be precomputed once per read (sum of interval lengths).
+/// Pass 0 if min_overlap_fraction is not used.
+#[inline(always)]
 pub fn check_overlap_thresholds(
     overlap_len: u32,
-    intervals: &[Interval],
+    read_len: u32,
     feature: &Feature,
     args: &Args,
 ) -> bool {
@@ -217,13 +230,10 @@ pub fn check_overlap_thresholds(
     }
 
     // Check minimum fraction of read
-    if args.min_overlap_fraction > 0.0 {
-        let read_len: u32 = intervals.iter().map(|i| i.len()).sum();
-        if read_len > 0 {
-            let frac = overlap_len as f32 / read_len as f32;
-            if frac < args.min_overlap_fraction {
-                return false;
-            }
+    if args.min_overlap_fraction > 0.0 && read_len > 0 {
+        let frac = overlap_len as f32 / read_len as f32;
+        if frac < args.min_overlap_fraction {
+            return false;
         }
     }
 

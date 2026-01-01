@@ -1,39 +1,65 @@
 use anyhow::{Context, Result};
 use bio::io::gff::{self, GffType};
 use bio_types::strand::Strand as BioStrand;
+use flate2::read::GzDecoder;
 use log::debug;
 use rustc_hash::FxHashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 use std::sync::Arc;
 
 use super::feature::{Feature, Strand};
 use super::index::AnnotationIndex;
 use crate::cli::Args;
 
-/// Load GTF/GFF file and build annotation index
-pub fn load_gtf(args: &Args) -> Result<AnnotationIndex> {
-    let path = &args.annotation;
+/// Check if a file is gzip-compressed by reading magic bytes
+fn is_gzipped(file: &mut File) -> std::io::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let mut magic = [0u8; 2];
+    let n = file.read(&mut magic)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(n == 2 && magic == [0x1f, 0x8b])
+}
 
-    // Detect format (GTF vs GFF3) based on file extension
-    let gff_type = if path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .as_deref()
-        == Some("gff3")
-        || path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .as_deref()
-            == Some("gff")
-    {
+/// Create a buffered reader, auto-detecting gzip compression
+fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+    let mut file =
+        File::open(path).with_context(|| format!("Failed to open: {}", path.display()))?;
+
+    if is_gzipped(&mut file)? {
+        Ok(Box::new(BufReader::with_capacity(
+            1024 * 1024,
+            GzDecoder::new(file),
+        )))
+    } else {
+        Ok(Box::new(BufReader::with_capacity(1024 * 1024, file)))
+    }
+}
+
+/// Detect GFF type from filename (handles .gz suffix)
+fn detect_gff_type(path: &Path) -> GffType {
+    let filename = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    if filename.contains(".gff3") || filename.contains(".gff") {
         GffType::GFF3
     } else {
         GffType::GTF2
-    };
+    }
+}
+
+/// Load GTF/GFF file and build annotation index
+pub fn load_gtf(args: &Args) -> Result<AnnotationIndex> {
+    let path = &args.annotation;
+    let gff_type = detect_gff_type(path);
 
     debug!("Parsing annotation file as {:?}", gff_type);
 
-    let mut reader = gff::Reader::from_file(path, gff_type)
-        .with_context(|| format!("Failed to open annotation file: {}", path.display()))?;
+    let reader = open_reader(path)?;
+    let mut reader = gff::Reader::new(reader, gff_type);
 
     // Build lookups for chromosome and gene names
     let mut chrom_to_id: FxHashMap<Arc<str>, u16> = FxHashMap::default();

@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use crate::annotation::AnnotationIndex;
-use crate::cli::Args;
+use crate::cli::{Args, OutputFormat};
 use crate::counting::CountResult;
 
 /// Calculate collapsed (non-overlapping) length from a set of intervals.
@@ -68,6 +69,18 @@ fn write_counts_inner<W: Write>(
     result: &CountResult,
     writer: &mut BufWriter<W>,
 ) -> Result<()> {
+    match args.output_format {
+        OutputFormat::Dexseq => write_dexseq_format(args, annotation, result, writer),
+        OutputFormat::Featurecounts => write_featurecounts_format(args, annotation, result, writer),
+    }
+}
+
+fn write_featurecounts_format<W: Write>(
+    args: &Args,
+    annotation: &AnnotationIndex,
+    result: &CountResult,
+    writer: &mut BufWriter<W>,
+) -> Result<()> {
     // Write comment line with program info (like featureCounts)
     write!(
         writer,
@@ -78,14 +91,14 @@ fn write_counts_inner<W: Write>(
     write!(writer, "\"-a\" \"{}\" ", args.annotation.display())?;
     write!(writer, "\"-o\" \"{}\" ", args.output.display())?;
     for bam in &args.bam_files {
-        write!(writer, "\"{}\" ", bam.display())?;
+        write!(writer, "\"{}\" ", bam.path.display())?;
     }
     writeln!(writer)?;
 
-    // Write header (use full path like featureCounts)
+    // Write header (use sample names for cleaner output)
     write!(writer, "Geneid\tChr\tStart\tEnd\tStrand\tLength")?;
-    for bam_path in &args.bam_files {
-        write!(writer, "\t{}", bam_path.display())?;
+    for bam in &args.bam_files {
+        write!(writer, "\t{}", bam.display_name())?;
     }
     writeln!(writer)?;
 
@@ -95,6 +108,57 @@ fn write_counts_inner<W: Write>(
     } else {
         // Gene-level output
         write_gene_level(args, annotation, result, writer)?;
+    }
+
+    Ok(())
+}
+
+/// Write DEXSeq-style output format.
+///
+/// Format: gene_id, exon_id, sample1, sample2, ...
+/// exon_id is formatted as gene_id:E### with per-gene numbering
+fn write_dexseq_format<W: Write>(
+    args: &Args,
+    annotation: &AnnotationIndex,
+    result: &CountResult,
+    writer: &mut BufWriter<W>,
+) -> Result<()> {
+    // Write header: gene_id, exon_id, sample1, sample2, ...
+    write!(writer, "gene_id\texon_id")?;
+    for bam in &args.bam_files {
+        write!(writer, "\t{}", bam.display_name())?;
+    }
+    writeln!(writer)?;
+
+    // Track exon number per gene for proper E001, E002, etc.
+    let mut gene_exon_counts: FxHashMap<u32, u32> = FxHashMap::default();
+
+    // For each feature, output gene_id and gene_id:E### with per-gene counter
+    for (feat_idx, feature) in annotation.features.iter().enumerate() {
+        let gene_name = annotation
+            .gene_names
+            .get(feature.gene_id as usize)
+            .map(|s| s.as_ref())
+            .unwrap_or("unknown");
+
+        let exon_num = gene_exon_counts.entry(feature.gene_id).or_insert(0);
+        *exon_num += 1;
+
+        let exon_id = format!("{}:E{:03}", gene_name, exon_num);
+
+        // Write gene_id and exon_id
+        write!(writer, "{}\t{}", gene_name, exon_id)?;
+
+        // Write count for this feature
+        let count = result.counts.get(feat_idx).copied().unwrap_or(0);
+        let count_str = if args.fractional_counting {
+            format!("{:.6}", count as f64 / 1_000_000.0)
+        } else {
+            count.to_string()
+        };
+        write!(writer, "\t{}", count_str)?;
+
+        writeln!(writer)?;
     }
 
     Ok(())

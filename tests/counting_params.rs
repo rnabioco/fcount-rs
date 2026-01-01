@@ -3,7 +3,7 @@
 //! These tests verify that CLI parameters correctly control the counting logic.
 
 use fcount_rs::annotation::{Feature, Strand};
-use fcount_rs::cli::{Args, StrandMode};
+use fcount_rs::cli::{Args, BamInput, OutputFormat, StrandMode};
 use fcount_rs::counting::overlap::{self, FeatureHit};
 use std::path::PathBuf;
 
@@ -12,7 +12,10 @@ fn default_args() -> Args {
     Args {
         annotation: PathBuf::from("test.gtf"),
         output: PathBuf::from("test.txt"),
-        bam_files: vec![PathBuf::from("test.bam")],
+        bam_files: vec![BamInput {
+            path: PathBuf::from("test.bam"),
+            sample_name: None,
+        }],
         feature_type: "exon".to_string(),
         gene_id_attr: "gene_id".to_string(),
         feature_level: false,
@@ -33,6 +36,7 @@ fn default_args() -> Args {
         details_file: None,
         quiet: false,
         no_chimeric: false,
+        output_format: OutputFormat::Featurecounts,
     }
 }
 

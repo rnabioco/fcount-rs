@@ -118,7 +118,7 @@ pub struct AlignmentReader {
 }
 
 enum ReaderInner {
-    Bam(bam::io::Reader<bgzf::MultithreadedReader<File>>),
+    Bam(bam::io::Reader<bgzf::io::MultithreadedReader<File>>),
     Sam(sam::io::Reader<std::io::BufReader<File>>),
 }
 
@@ -143,7 +143,7 @@ impl AlignmentReader {
             // Use multi-threaded BGZF reader for parallel decompression
             let worker_count =
                 NonZeroUsize::new(threads.max(1)).expect("thread count must be positive");
-            let bgzf_reader = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+            let bgzf_reader = bgzf::io::MultithreadedReader::with_worker_count(worker_count, file);
             let mut bam_reader = bam::io::Reader::from(bgzf_reader);
             let header = bam_reader.read_header()?;
 
@@ -186,7 +186,7 @@ impl AlignmentReader {
 
             let worker_count =
                 NonZeroUsize::new(threads.max(1)).expect("thread count must be positive");
-            let bgzf_reader = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+            let bgzf_reader = bgzf::io::MultithreadedReader::with_worker_count(worker_count, file);
             let mut bam_reader = bam::io::Reader::from(bgzf_reader);
             let header = bam_reader.read_header()?;
 

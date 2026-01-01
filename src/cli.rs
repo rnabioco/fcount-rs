@@ -1,4 +1,4 @@
-use clap::{builder::styling, Parser};
+use clap::{builder::styling, Parser, ValueEnum};
 use std::path::PathBuf;
 
 fn styles() -> styling::Styles {
@@ -7,6 +7,60 @@ fn styles() -> styling::Styles {
         .usage(styling::AnsiColor::Green.on_default().bold())
         .literal(styling::AnsiColor::Cyan.on_default().bold())
         .placeholder(styling::AnsiColor::Yellow.on_default())
+}
+
+/// A BAM file input with optional sample name.
+///
+/// Supports both formats:
+/// - `path/to/file.bam` (sample name derived from filename)
+/// - `samplename=path/to/file.bam` (explicit sample name)
+#[derive(Debug, Clone)]
+pub struct BamInput {
+    pub path: PathBuf,
+    pub sample_name: Option<String>,
+}
+
+impl BamInput {
+    /// Parse a BAM input string in format "path" or "name=path"
+    pub fn parse(s: &str) -> Self {
+        if let Some((name, path)) = s.split_once('=') {
+            BamInput {
+                path: PathBuf::from(path),
+                sample_name: Some(name.to_string()),
+            }
+        } else {
+            BamInput {
+                path: PathBuf::from(s),
+                sample_name: None,
+            }
+        }
+    }
+
+    /// Get display name: explicit sample name, or filename stem
+    pub fn display_name(&self) -> String {
+        self.sample_name.clone().unwrap_or_else(|| {
+            self.path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        })
+    }
+}
+
+/// Output format for the count matrix
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// featureCounts-compatible format with metadata columns
+    #[default]
+    Featurecounts,
+    /// DEXSeq format with gene_id, exon_id, and sample columns only
+    Dexseq,
+}
+
+/// Parse a BAM input string in format "path" or "name=path"
+fn parse_bam_input(s: &str) -> Result<BamInput, String> {
+    Ok(BamInput::parse(s))
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -27,9 +81,9 @@ pub struct Args {
     #[arg(short = 'o', long = "output", help_heading = "Input/Output")]
     pub output: PathBuf,
 
-    /// Input BAM/SAM file(s)
-    #[arg(required = true, help_heading = "Input/Output")]
-    pub bam_files: Vec<PathBuf>,
+    /// Input BAM/SAM file(s), optionally with sample names (sample=file.bam)
+    #[arg(required = true, help_heading = "Input/Output", value_parser = parse_bam_input)]
+    pub bam_files: Vec<BamInput>,
 
     // ============ Feature Selection ============
     /// Feature type to count (e.g., exon, gene)
@@ -155,6 +209,15 @@ pub struct Args {
     /// Suppress progress output
     #[arg(short = 'q', long = "quiet", help_heading = "Output Options")]
     pub quiet: bool,
+
+    /// Output format: featurecounts (default) or dexseq
+    #[arg(
+        long = "format",
+        default_value = "featurecounts",
+        help_heading = "Output Options",
+        value_enum
+    )]
+    pub output_format: OutputFormat,
 
     // ============ Not Yet Implemented ============
     /// Do NOT count chimeric fragments (mates on different chromosomes)

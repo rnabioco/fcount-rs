@@ -59,15 +59,15 @@ pub fn count_reads(args: &Args, annotation: &AnnotationIndex) -> Result<CountRes
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
         .par_iter()
-        .map(|bam_path| {
-            let result = process_bam_file(bam_path, args, annotation, count_size);
+        .map(|bam_input| {
+            let result = process_bam_file(&bam_input.path, args, annotation, count_size);
 
             let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
             info!(
                 "Processed {}/{} BAM files: {}",
                 done,
                 args.bam_files.len(),
-                bam_path.display()
+                bam_input.display_name()
             );
 
             result
@@ -553,16 +553,10 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
         .par_iter()
-        .map(|bam_path| {
-            let result = process_bam_parallel(bam_path, args, annotation, count_size, tpf);
+        .map(|bam_input| {
+            let result = process_bam_parallel(&bam_input.path, args, annotation, count_size, tpf);
             pb.inc(1);
-            pb.set_message(
-                bam_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-            );
+            pb.set_message(bam_input.display_name());
             result
         })
         .collect();
@@ -1141,16 +1135,11 @@ pub fn count_reads_parallel_paired(
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
         .par_iter()
-        .map(|bam_path| {
-            let result = process_bam_parallel_paired(bam_path, args, annotation, count_size, tpf);
+        .map(|bam_input| {
+            let result =
+                process_bam_parallel_paired(&bam_input.path, args, annotation, count_size, tpf);
             pb.inc(1);
-            pb.set_message(
-                bam_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-            );
+            pb.set_message(bam_input.display_name());
             result
         })
         .collect();

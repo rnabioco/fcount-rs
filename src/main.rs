@@ -18,7 +18,7 @@ mod cli;
 mod counting;
 mod output;
 
-use cli::Args;
+use cli::{Args, OutputFormat};
 
 /// Detect if BAM file contains paired-end reads by checking first record
 fn detect_paired_end(bam_path: &std::path::Path) -> Result<bool> {
@@ -47,13 +47,19 @@ fn main() -> Result<()> {
     let mut args = Args::parse();
     let total_start = Instant::now();
 
+    // DEXSeq format requires feature-level output - auto-enable it
+    if args.output_format == OutputFormat::Dexseq && !args.feature_level {
+        info!("DEXSeq format requires feature-level output, enabling --feature-level");
+        args.feature_level = true;
+    }
+
     // Auto-detect thread count
     let effective_threads = args.effective_threads();
     args.threads = effective_threads;
 
     // Auto-detect paired-end mode from first BAM file
     if !args.paired_end && !args.bam_files.is_empty() {
-        match detect_paired_end(&args.bam_files[0]) {
+        match detect_paired_end(&args.bam_files[0].path) {
             Ok(true) => {
                 info!("Auto-detected paired-end reads, enabling paired-end mode");
                 args.paired_end = true;

@@ -30,7 +30,7 @@ fn detect_paired_end(bam_path: &std::path::Path) -> Result<bool> {
     let _header = reader.read_header()?;
 
     // Read first record
-    for result in reader.records() {
+    if let Some(result) = reader.records().next() {
         let record: bam::Record = result?;
         let flags = record.flags();
         // Check if PAIRED flag is set

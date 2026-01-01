@@ -1,5 +1,5 @@
 use anyhow::Result;
-use coitrees::{COITree, Interval, IntervalTree};
+use coitrees::{COITree, GenericInterval, Interval, IntervalTree};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -50,7 +50,8 @@ impl ChromIndex {
         // Convert to end-inclusive for coitrees
         let first = start as i32;
         let last = (end - 1) as i32;
-        self.tree.query(first, last, |node| callback(node.metadata));
+        self.tree
+            .query(first, last, |node| callback(*node.metadata()));
     }
 }
 

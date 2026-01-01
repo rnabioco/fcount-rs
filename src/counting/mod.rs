@@ -516,6 +516,8 @@ fn process_bam_parallel(
         // Drop extra receiver so channel closes when producer is done
         drop(rx);
 
+        debug!("Starting read processing: {}", bam_path.display());
+
         // Producer: read batches and send to workers
         while let Some(batch) = reader.read_batch().expect("Failed to read batch") {
             if tx.send(batch).is_err() {
@@ -666,6 +668,8 @@ fn process_bam_parallel_paired(
 
         // Drop extra receiver so channel closes when producer is done
         drop(rx);
+
+        debug!("Starting read processing: {}", bam_path.display());
 
         // Producer: read batches and send to workers
         while let Some(batch) = reader.read_batch().expect("Failed to read batch") {

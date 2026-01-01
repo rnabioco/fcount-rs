@@ -1161,7 +1161,7 @@ fn process_deferred_as_single(
         );
     }
 
-    let assignment = overlap::resolve_assignment(&hit_buffer, args);
+    let assignment = overlap::resolve_assignment(hit_buffer, args);
 
     // Apply assignment directly to counts/stats
     // Use same counting as ThreadCounter (1 for non-fractional, FRACTION_MULTIPLIER for fractional)

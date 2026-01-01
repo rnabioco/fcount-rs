@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::feature::Feature;
 
 /// Per-chromosome spatial index using cache-oblivious interval tree
+#[derive(Clone)]
 pub struct ChromIndex {
     /// COITree for fast interval queries
     /// Stores feature index as metadata
@@ -56,7 +57,7 @@ impl ChromIndex {
 }
 
 /// Main annotation index containing all features and spatial indices
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnnotationIndex {
     /// Chromosome name to ID mapping
     pub chrom_to_id: FxHashMap<Arc<str>, u16>,

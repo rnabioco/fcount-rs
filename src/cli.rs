@@ -138,11 +138,11 @@ pub struct Args {
     pub largest_overlap_only: bool,
 
     // ============ Performance ============
-    /// Number of threads for parallel processing
+    /// Number of threads for parallel processing (0 = auto-detect)
     #[arg(
         short = 'T',
         long = "threads",
-        default_value = "1",
+        default_value = "0",
         help_heading = "Performance"
     )]
     pub threads: usize,
@@ -179,6 +179,17 @@ impl Args {
             || self.min_overlap_fraction > 0.0
             || self.min_feature_overlap_fraction > 0.0
             || self.largest_overlap_only
+    }
+
+    /// Get effective thread count (auto-detect if 0)
+    pub fn effective_threads(&self) -> usize {
+        if self.threads == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        } else {
+            self.threads
+        }
     }
 }
 

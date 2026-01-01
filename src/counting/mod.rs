@@ -1,15 +1,17 @@
 mod counter;
-mod overlap;
+pub mod overlap;
 mod sharded_mate_tracker;
 mod stats;
 mod worker;
 
 pub use counter::ThreadCounter;
+pub use overlap::Assignment;
 pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
 pub use stats::ReadCounters;
 
 use anyhow::Result;
 use crossbeam::channel;
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, info};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -176,15 +178,13 @@ fn process_single_read(
         }
     };
 
-    // Find overlapping features
+    // Find overlapping features using callback-based query (no allocation)
     counter.hit_buffer.clear();
     for interval in &record.intervals {
-        for (feat_idx, feature) in
-            annotation.find_overlapping(chrom_id, interval.start, interval.end)
-        {
+        annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
             // Check strand if stranded mode
             if !overlap::check_strand(record, feature, args) {
-                continue;
+                return;
             }
 
             // Calculate overlap if needed
@@ -196,7 +196,7 @@ fn process_single_read(
 
             // Check minimum overlap
             if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                continue;
+                return;
             }
 
             counter.hit_buffer.push(overlap::FeatureHit {
@@ -204,7 +204,7 @@ fn process_single_read(
                 gene_id: feature.gene_id,
                 overlap_len,
             });
-        }
+        });
     }
 
     // Assign read
@@ -282,16 +282,14 @@ fn process_fragment(
         }
     };
 
-    // Collect hits from both mates
+    // Collect hits from both mates using callback-based query (no allocation)
     counter.hit_buffer.clear();
 
     // Hits from current record
     for interval in &record.intervals {
-        for (feat_idx, feature) in
-            annotation.find_overlapping(chrom_id, interval.start, interval.end)
-        {
+        annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
             if !overlap::check_strand_paired(record, mate, feature, args) {
-                continue;
+                return;
             }
 
             let overlap_len = if args.need_overlap_length() {
@@ -302,7 +300,7 @@ fn process_fragment(
             };
 
             if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                continue;
+                return;
             }
 
             counter.hit_buffer.push(overlap::FeatureHit {
@@ -310,22 +308,24 @@ fn process_fragment(
                 gene_id: feature.gene_id,
                 overlap_len,
             });
-        }
+        });
     }
 
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
+        // Build set of already-seen features for O(1) duplicate check
+        let seen_features: rustc_hash::FxHashSet<u32> =
+            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
+
         for interval in &mate.intervals {
-            for (feat_idx, feature) in
-                annotation.find_overlapping(chrom_id, interval.start, interval.end)
-            {
-                // Skip if already counted
-                if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
-                    continue;
+            annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
+                // Skip if already counted - O(1) lookup
+                if seen_features.contains(&feat_idx) {
+                    return;
                 }
 
                 if !overlap::check_strand_paired(record, mate, feature, args) {
-                    continue;
+                    return;
                 }
 
                 let overlap_len = if args.need_overlap_length() {
@@ -341,7 +341,7 @@ fn process_fragment(
 
                 if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
                 {
-                    continue;
+                    return;
                 }
 
                 counter.hit_buffer.push(overlap::FeatureHit {
@@ -349,7 +349,7 @@ fn process_fragment(
                     gene_id: feature.gene_id,
                     overlap_len,
                 });
-            }
+            });
         }
     }
 
@@ -365,15 +365,16 @@ fn process_bam_parallel(
     args: &Args,
     annotation: &AnnotationIndex,
     count_size: usize,
+    threads_per_file: usize,
 ) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
 
-    // Open BAM reader with all available threads for decompression
-    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, args.threads)?;
+    // Open BAM reader with specified threads for decompression
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, threads_per_file)?;
     let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
 
     // Number of worker threads
-    let num_workers = args.threads.max(1);
+    let num_workers = threads_per_file.max(1);
 
     // Channel for batch distribution - larger buffer to prevent worker starvation
     let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
@@ -442,26 +443,32 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         num_genes
     };
 
-    // Process each BAM file
-    let progress = AtomicUsize::new(0);
+    // Process BAM files in parallel
+    // Cap threads per file at 4 - more shows diminishing returns due to I/O saturation
+    let num_files = args.bam_files.len();
+    let threads_per_file = 4.min(args.threads).max(1);
+
+    // Create progress bar
+    let pb = ProgressBar::new(num_files as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} BAM files ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
-        .iter()
+        .par_iter()
         .map(|bam_path| {
-            let result = process_bam_parallel(bam_path, args, annotation, count_size);
-
-            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            info!(
-                "Processed {}/{} BAM files: {}",
-                done,
-                args.bam_files.len(),
-                bam_path.display()
-            );
-
+            let result = process_bam_parallel(bam_path, args, annotation, count_size, threads_per_file);
+            pb.inc(1);
+            pb.set_message(bam_path.file_name().unwrap_or_default().to_string_lossy().to_string());
             result
         })
         .collect();
+
+    pb.finish_with_message("Done");
 
     // Merge results
     let mut final_counts = vec![0i64; count_size];
@@ -494,16 +501,17 @@ fn process_bam_parallel_paired(
     args: &Args,
     annotation: &AnnotationIndex,
     count_size: usize,
+    threads_per_file: usize,
 ) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
     use crate::alignment::minimal_parser::MinimalRecord;
 
-    // Open BAM reader with all available threads for decompression
-    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, args.threads)?;
+    // Open BAM reader with specified threads for decompression
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, threads_per_file)?;
     let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
 
     // All threads are workers
-    let num_workers = args.threads.max(1);
+    let num_workers = threads_per_file.max(1);
 
     // Create sharded mate tracker with 8x shards per worker to reduce contention
     let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 8));
@@ -844,14 +852,18 @@ fn process_minimal_fragment(
 
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
+        // Build set of already-seen features for O(1) duplicate check
+        let seen_features: rustc_hash::FxHashSet<u32> =
+            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
+
         for interval in &mate.intervals {
             annotation.query_overlapping(
                 chrom_id,
                 interval.start,
                 interval.end,
                 |feat_idx, feature| {
-                    // Skip if already counted
-                    if counter.hit_buffer.iter().any(|h| h.feature_idx == feat_idx) {
+                    // Skip if already counted - O(1) lookup
+                    if seen_features.contains(&feat_idx) {
                         return;
                     }
 
@@ -911,18 +923,17 @@ fn process_deferred_as_single(
 ) {
     let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(16);
 
-    for interval in &deferred.intervals {
-        for (feat_idx, feature) in
-            annotation.find_overlapping(deferred.chrom_id, interval.start, interval.end)
-        {
-            let deferred_strand = if deferred.is_reverse_strand() {
-                crate::annotation::Strand::Reverse
-            } else {
-                crate::annotation::Strand::Forward
-            };
+    // Precompute strand once
+    let deferred_strand = if deferred.is_reverse_strand() {
+        crate::annotation::Strand::Reverse
+    } else {
+        crate::annotation::Strand::Forward
+    };
 
+    for interval in &deferred.intervals {
+        annotation.query_overlapping(deferred.chrom_id, interval.start, interval.end, |feat_idx, feature| {
             if !overlap::check_strand_with_strand(deferred_strand, feature, args) {
-                continue;
+                return;
             }
 
             let overlap_len = if args.need_overlap_length() {
@@ -932,7 +943,7 @@ fn process_deferred_as_single(
             };
 
             if !overlap::check_overlap_thresholds(overlap_len, &deferred.intervals, feature, args) {
-                continue;
+                return;
             }
 
             hit_buffer.push(overlap::FeatureHit {
@@ -940,12 +951,15 @@ fn process_deferred_as_single(
                 gene_id: feature.gene_id,
                 overlap_len,
             });
-        }
+        });
     }
 
     let assignment = overlap::resolve_assignment(&hit_buffer, args);
 
     // Apply assignment directly to counts/stats
+    // Use same counting as ThreadCounter (1 for non-fractional, 1_000_000 for fractional)
+    let count_value = if args.fractional_counting { 1_000_000 } else { 1 };
+
     match assignment {
         overlap::Assignment::Unique(hit) => {
             let id = if args.feature_level {
@@ -953,7 +967,7 @@ fn process_deferred_as_single(
             } else {
                 hit.gene_id as usize
             };
-            counts[id] += 1_000_000; // Fixed-point
+            counts[id] += count_value;
             stats.assigned += 1;
         }
         overlap::Assignment::Ambiguous => {
@@ -964,7 +978,7 @@ fn process_deferred_as_single(
         }
         overlap::Assignment::MultiOverlap(hits) => {
             if args.allow_multi_overlap {
-                let frac = 1_000_000 / hits.len() as i64;
+                let frac = count_value / hits.len() as i64;
                 for hit in hits {
                     let id = if args.feature_level {
                         hit.feature_idx as usize
@@ -994,26 +1008,33 @@ pub fn count_reads_parallel_paired(
         num_genes
     };
 
-    // Process each BAM file
-    let progress = AtomicUsize::new(0);
+    // Process BAM files in parallel
+    // Cap threads per file at 4 - more shows diminishing returns due to I/O saturation
+    let num_files = args.bam_files.len();
+    let threads_per_file = 4.min(args.threads).max(1);
+
+    // Create progress bar
+    let pb = ProgressBar::new(num_files as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} BAM files ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
 
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
-        .iter()
+        .par_iter()
         .map(|bam_path| {
-            let result = process_bam_parallel_paired(bam_path, args, annotation, count_size);
-
-            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            info!(
-                "Processed {}/{} BAM files: {}",
-                done,
-                args.bam_files.len(),
-                bam_path.display()
-            );
-
+            let result =
+                process_bam_parallel_paired(bam_path, args, annotation, count_size, threads_per_file);
+            pb.inc(1);
+            pb.set_message(bam_path.file_name().unwrap_or_default().to_string_lossy().to_string());
             result
         })
         .collect();
+
+    pb.finish_with_message("Done");
 
     // Merge results
     let mut final_counts = vec![0i64; count_size];

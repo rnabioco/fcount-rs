@@ -1,4 +1,5 @@
 use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 
 use crate::alignment::{AlignmentRecord, Interval, PendingMate};
 use crate::annotation::{Feature, Strand};
@@ -171,6 +172,7 @@ pub fn check_overlap_thresholds(
 }
 
 /// Resolve assignment from a list of feature hits
+/// Optimized to avoid allocations for common cases (1-4 hits)
 pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
     if hits.is_empty() {
         return Assignment::NoFeature;
@@ -180,10 +182,11 @@ pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
         return Assignment::Unique(hits[0].clone());
     }
 
-    // Group hits by gene
-    let unique_genes: FxHashSet<u32> = hits.iter().map(|h| h.gene_id).collect();
+    // Quick check: are all hits from the same gene? (common case)
+    let first_gene = hits[0].gene_id;
+    let all_same_gene = hits.iter().skip(1).all(|h| h.gene_id == first_gene);
 
-    if unique_genes.len() == 1 {
+    if all_same_gene {
         // All hits are from the same gene - pick the one with best overlap
         if args.largest_overlap_only {
             let best = hits.iter().max_by_key(|h| h.overlap_len).unwrap();
@@ -196,37 +199,39 @@ pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
     // Multiple genes
     if args.allow_multi_overlap {
         if args.largest_overlap_only {
-            // Find the gene(s) with largest overlap
+            // Find the gene(s) with largest overlap - single pass
             let max_overlap = hits.iter().map(|h| h.overlap_len).max().unwrap();
-            let best_hits: Vec<_> = hits
-                .iter()
-                .filter(|h| h.overlap_len == max_overlap)
-                .cloned()
-                .collect();
+
+            // Use SmallVec to avoid heap allocation for typical cases
+            let mut best_hits: SmallVec<[FeatureHit; 8]> = SmallVec::new();
+            let mut seen_genes: SmallVec<[u32; 8]> = SmallVec::new();
+
+            for h in hits {
+                if h.overlap_len == max_overlap && !seen_genes.contains(&h.gene_id) {
+                    seen_genes.push(h.gene_id);
+                    best_hits.push(h.clone());
+                }
+            }
 
             if best_hits.len() == 1 {
                 return Assignment::Unique(best_hits.into_iter().next().unwrap());
             }
 
-            // Deduplicate by gene
-            let mut seen_genes = FxHashSet::default();
-            let deduped: Vec<_> = best_hits
-                .into_iter()
-                .filter(|h| seen_genes.insert(h.gene_id))
-                .collect();
-
-            return Assignment::MultiOverlap(deduped);
+            return Assignment::MultiOverlap(best_hits.into_vec());
         }
 
-        // Deduplicate by gene
-        let mut seen_genes = FxHashSet::default();
-        let deduped: Vec<_> = hits
-            .iter()
-            .filter(|h| seen_genes.insert(h.gene_id))
-            .cloned()
-            .collect();
+        // Deduplicate by gene using SmallVec
+        let mut seen_genes: SmallVec<[u32; 8]> = SmallVec::new();
+        let mut deduped: SmallVec<[FeatureHit; 8]> = SmallVec::new();
 
-        return Assignment::MultiOverlap(deduped);
+        for h in hits {
+            if !seen_genes.contains(&h.gene_id) {
+                seen_genes.push(h.gene_id);
+                deduped.push(h.clone());
+            }
+        }
+
+        return Assignment::MultiOverlap(deduped.into_vec());
     }
 
     // Multiple genes without multi-overlap - ambiguous
@@ -248,8 +253,6 @@ mod tests {
             paired_end: false,
             require_both_aligned: false,
             count_chimeric: false,
-            min_fragment_length: 50,
-            max_fragment_length: 600,
             strand_mode: 0,
             count_multi_mapping: false,
             fractional_counting: false,

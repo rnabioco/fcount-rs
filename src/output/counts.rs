@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -6,40 +8,99 @@ use crate::annotation::AnnotationIndex;
 use crate::cli::Args;
 use crate::counting::CountResult;
 
-/// Write count matrix to output file
+/// Calculate collapsed (non-overlapping) length from a set of intervals.
+/// Uses 1-based inclusive coordinates to match featureCounts.
+fn calculate_collapsed_length(intervals: &[(u32, u32)]) -> u32 {
+    if intervals.is_empty() {
+        return 0;
+    }
+
+    // Sort by start position
+    let mut sorted: Vec<(u32, u32)> = intervals.to_vec();
+    sorted.sort_by_key(|&(start, _)| start);
+
+    // Merge overlapping/adjacent intervals
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(sorted.len());
+    for (start, end) in sorted {
+        if let Some(last) = merged.last_mut() {
+            // Merge if overlapping or adjacent (start <= prev_end + 1)
+            if start <= last.1 + 1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    // Sum lengths using 1-based inclusive: end - start + 1
+    merged.iter().map(|&(s, e)| e - s + 1).sum()
+}
+
+/// Write count matrix to output file (gzipped if filename ends in .gz)
 pub fn write_counts(args: &Args, annotation: &AnnotationIndex, result: &CountResult) -> Result<()> {
     let file = File::create(&args.output)
         .with_context(|| format!("Failed to create output file: {}", args.output.display()))?;
-    let mut writer = BufWriter::new(file);
 
-    // Write header
+    // Check if output should be gzipped
+    let use_gzip = args
+        .output
+        .extension()
+        .map(|ext| ext == "gz")
+        .unwrap_or(false);
+
+    if use_gzip {
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut writer = BufWriter::new(encoder);
+        write_counts_inner(args, annotation, result, &mut writer)?;
+        writer.into_inner()?.finish()?;
+    } else {
+        let mut writer = BufWriter::new(file);
+        write_counts_inner(args, annotation, result, &mut writer)?;
+        writer.flush()?;
+    }
+
+    Ok(())
+}
+
+fn write_counts_inner<W: Write>(
+    args: &Args,
+    annotation: &AnnotationIndex,
+    result: &CountResult,
+    writer: &mut BufWriter<W>,
+) -> Result<()> {
+    // Write comment line with program info (like featureCounts)
+    write!(writer, "# Program:fcount v{}; Command:", env!("CARGO_PKG_VERSION"))?;
+    write!(writer, "\"fcount\" ")?;
+    write!(writer, "\"-a\" \"{}\" ", args.annotation.display())?;
+    write!(writer, "\"-o\" \"{}\" ", args.output.display())?;
+    for bam in &args.bam_files {
+        write!(writer, "\"{}\" ", bam.display())?;
+    }
+    writeln!(writer)?;
+
+    // Write header (use full path like featureCounts)
     write!(writer, "Geneid\tChr\tStart\tEnd\tStrand\tLength")?;
     for bam_path in &args.bam_files {
-        let sample_name = bam_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        write!(writer, "\t{}", sample_name)?;
+        write!(writer, "\t{}", bam_path.display())?;
     }
     writeln!(writer)?;
 
     if args.feature_level {
         // Feature-level output
-        write_feature_level(args, annotation, result, &mut writer)?;
+        write_feature_level(args, annotation, result, writer)?;
     } else {
         // Gene-level output
-        write_gene_level(args, annotation, result, &mut writer)?;
+        write_gene_level(args, annotation, result, writer)?;
     }
 
-    writer.flush()?;
     Ok(())
 }
 
-fn write_gene_level(
+fn write_gene_level<W: Write>(
     args: &Args,
     annotation: &AnnotationIndex,
     result: &CountResult,
-    writer: &mut BufWriter<File>,
+    writer: &mut BufWriter<W>,
 ) -> Result<()> {
     // Pre-group features by gene_id - O(n) instead of O(n*m)
     let mut gene_to_features: Vec<Vec<usize>> = vec![Vec::new(); annotation.gene_names.len()];
@@ -54,15 +115,13 @@ fn write_gene_level(
             continue;
         }
 
-        // Collect chromosome(s)
-        let chrom_ids: std::collections::BTreeSet<_> = feature_indices
+        // Collect chromosome(s) - one per feature to match featureCounts format
+        let chroms: Vec<_> = feature_indices
             .iter()
-            .map(|&idx| annotation.features[idx].chrom_id)
-            .collect();
-        let chroms: Vec<_> = chrom_ids
-            .iter()
-            .filter_map(|&id| annotation.id_to_chrom.get(id as usize))
-            .map(|s| s.as_ref())
+            .filter_map(|&idx| {
+                let chrom_id = annotation.features[idx].chrom_id;
+                annotation.id_to_chrom.get(chrom_id as usize).map(|s| s.as_ref())
+            })
             .collect();
         let chrom_str = chroms.join(";");
 
@@ -80,18 +139,26 @@ fn write_gene_level(
             .collect();
         let ends_str = ends.join(";");
 
-        // Strand (from first feature)
-        let strand = match annotation.features[feature_indices[0]].strand {
-            crate::annotation::Strand::Forward => "+",
-            crate::annotation::Strand::Reverse => "-",
-            crate::annotation::Strand::Unknown => ".",
-        };
-
-        // Length (sum of all feature lengths for this gene)
-        let length: u32 = feature_indices
+        // Strand - one per feature to match featureCounts format
+        let strands: Vec<_> = feature_indices
             .iter()
-            .map(|&idx| annotation.features[idx].len())
-            .sum();
+            .map(|&idx| match annotation.features[idx].strand {
+                crate::annotation::Strand::Forward => "+",
+                crate::annotation::Strand::Reverse => "-",
+                crate::annotation::Strand::Unknown => ".",
+            })
+            .collect();
+        let strand_str = strands.join(";");
+
+        // Length: collapsed (non-overlapping) length to match featureCounts
+        let intervals: Vec<(u32, u32)> = feature_indices
+            .iter()
+            .map(|&idx| {
+                let f = &annotation.features[idx];
+                (f.start, f.end)
+            })
+            .collect();
+        let length = calculate_collapsed_length(&intervals);
 
         // Count
         let count = result.counts.get(gene_idx).copied().unwrap_or(0);
@@ -104,18 +171,18 @@ fn write_gene_level(
         writeln!(
             writer,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            gene_name, chrom_str, starts_str, ends_str, strand, length, count_str
+            gene_name, chrom_str, starts_str, ends_str, strand_str, length, count_str
         )?;
     }
 
     Ok(())
 }
 
-fn write_feature_level(
+fn write_feature_level<W: Write>(
     args: &Args,
     annotation: &AnnotationIndex,
     result: &CountResult,
-    writer: &mut BufWriter<File>,
+    writer: &mut BufWriter<W>,
 ) -> Result<()> {
     for (feat_idx, feature) in annotation.features.iter().enumerate() {
         let gene_name = annotation

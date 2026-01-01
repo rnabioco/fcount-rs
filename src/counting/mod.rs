@@ -873,11 +873,12 @@ fn process_paired_batch(
 
         // Only mark as chimeric if both chromosomes are in annotation AND different
         // If mate_chrom_id is None, mate is on chromosome not in annotation - not chimeric
-        if let Some(mate_chrom) = mate_chrom_id {
-            if mate_chrom != chrom_id && args.no_chimeric {
-                counter.stats.unassigned_chimeric += 1;
-                continue;
-            }
+        if let Some(mate_chrom) = mate_chrom_id
+            && mate_chrom != chrom_id
+            && args.no_chimeric
+        {
+            counter.stats.unassigned_chimeric += 1;
+            continue;
         }
 
         // Hash the read name and check for existing mate first

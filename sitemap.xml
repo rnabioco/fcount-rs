@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://rnabioco.github.io/fcount-rs/</loc>
+         <lastmod>2026-01-01</lastmod>
+    </url>
+    <url>
+         <loc>https://rnabioco.github.io/fcount-rs/examples/</loc>
+         <lastmod>2026-01-01</lastmod>
+    </url>
+    <url>
+         <loc>https://rnabioco.github.io/fcount-rs/installation/</loc>
+         <lastmod>2026-01-01</lastmod>
+    </url>
+    <url>
+         <loc>https://rnabioco.github.io/fcount-rs/usage/</loc>
+         <lastmod>2026-01-01</lastmod>
+    </url>
+</urlset>

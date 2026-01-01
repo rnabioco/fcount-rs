@@ -266,6 +266,7 @@ mod tests {
             threads: 1,
             details_file: None,
             quiet: false,
+            output_format: crate::cli::OutputFormat::Featurecounts,
         }
     }
 

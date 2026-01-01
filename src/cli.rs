@@ -1,4 +1,4 @@
-use clap::{builder::styling, Parser, ValueEnum};
+use clap::{Parser, ValueEnum, builder::styling};
 use std::path::PathBuf;
 
 fn styles() -> styling::Styles {

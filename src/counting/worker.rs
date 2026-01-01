@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::alignment::block_reader::RecordBatch;
-use crate::alignment::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
+use crate::alignment::minimal_parser::{MinimalRecord, get_record_size, parse_bam_record};
 use crate::alignment::total_overlap;
 use crate::annotation::{AnnotationIndex, Strand};
 use crate::cli::{Args, StrandMode};

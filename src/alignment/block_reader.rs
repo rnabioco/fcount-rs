@@ -12,7 +12,7 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use super::minimal_parser::{get_record_size, parse_bam_record, MinimalRecord};
+use super::minimal_parser::{MinimalRecord, get_record_size, parse_bam_record};
 use crate::annotation::AnnotationIndex;
 
 /// Size of each batch of decompressed BAM data (target ~4MB per batch)

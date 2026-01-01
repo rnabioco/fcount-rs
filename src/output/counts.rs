@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};

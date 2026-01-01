@@ -8,7 +8,7 @@ pub use feature::{Feature, Strand};
 pub use index::AnnotationIndex;
 
 use crate::cli::Args;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use log::info;
 
 /// Load annotation from GTF/GFF file and build spatial index.

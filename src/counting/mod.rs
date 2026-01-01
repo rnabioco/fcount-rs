@@ -1,8 +1,15 @@
+mod constants;
 mod counter;
+pub mod filtering;
 pub mod overlap;
 mod sharded_mate_tracker;
 mod stats;
 mod worker;
+
+pub use constants::{
+    channel_buffer_size, mate_tracker_shards, threads_per_file, FRACTION_MULTIPLIER,
+};
+pub use filtering::Filterable;
 
 pub use counter::ThreadCounter;
 pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
@@ -464,7 +471,7 @@ fn process_bam_parallel(
     let num_workers = threads_per_file.max(1);
 
     // Channel for batch distribution - larger buffer to prevent worker starvation
-    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
+    let (tx, rx) = channel::bounded::<RecordBatch>(channel_buffer_size(num_workers));
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
@@ -531,9 +538,8 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
     };
 
     // Process BAM files in parallel
-    // Cap threads per file at 4 - more shows diminishing returns due to I/O saturation
     let num_files = args.bam_files.len();
-    let threads_per_file = 4.min(args.threads).max(1);
+    let tpf = threads_per_file(args.threads);
 
     // Create progress bar
     let pb = ProgressBar::new(num_files as u64);
@@ -548,8 +554,7 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result =
-                process_bam_parallel(bam_path, args, annotation, count_size, threads_per_file);
+            let result = process_bam_parallel(bam_path, args, annotation, count_size, tpf);
             pb.inc(1);
             pb.set_message(
                 bam_path
@@ -608,10 +613,10 @@ fn process_bam_parallel_paired(
     let num_workers = threads_per_file.max(1);
 
     // Create sharded mate tracker with 8x shards per worker to reduce contention
-    let mate_tracker = Arc::new(ShardedMateTracker::new(num_workers * 8));
+    let mate_tracker = Arc::new(ShardedMateTracker::new(mate_tracker_shards(num_workers)));
 
     // Large channel buffer for read-ahead
-    let (tx, rx) = channel::bounded::<RecordBatch>(num_workers * 4);
+    let (tx, rx) = channel::bounded::<RecordBatch>(channel_buffer_size(num_workers));
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
@@ -1065,9 +1070,9 @@ fn process_deferred_as_single(
     let assignment = overlap::resolve_assignment(&hit_buffer, args);
 
     // Apply assignment directly to counts/stats
-    // Use same counting as ThreadCounter (1 for non-fractional, 1_000_000 for fractional)
+    // Use same counting as ThreadCounter (1 for non-fractional, FRACTION_MULTIPLIER for fractional)
     let count_value = if args.fractional_counting {
-        1_000_000
+        FRACTION_MULTIPLIER
     } else {
         1
     };
@@ -1121,9 +1126,8 @@ pub fn count_reads_parallel_paired(
     };
 
     // Process BAM files in parallel
-    // Cap threads per file at 4 - more shows diminishing returns due to I/O saturation
     let num_files = args.bam_files.len();
-    let threads_per_file = 4.min(args.threads).max(1);
+    let tpf = threads_per_file(args.threads);
 
     // Create progress bar
     let pb = ProgressBar::new(num_files as u64);
@@ -1138,13 +1142,7 @@ pub fn count_reads_parallel_paired(
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result = process_bam_parallel_paired(
-                bam_path,
-                args,
-                annotation,
-                count_size,
-                threads_per_file,
-            );
+            let result = process_bam_parallel_paired(bam_path, args, annotation, count_size, tpf);
             pb.inc(1);
             pb.set_message(
                 bam_path

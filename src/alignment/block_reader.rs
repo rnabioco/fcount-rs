@@ -4,6 +4,7 @@
 //! for distribution to worker threads.
 
 use anyhow::{Context, Result};
+use log::debug;
 use noodles_bgzf as bgzf;
 use noodles_sam as sam;
 use std::fs::File;
@@ -78,6 +79,7 @@ impl BamBlockReader {
     ) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open BAM file: {}", path.display()))?;
+        debug!("Opening BAM file: {}", path.display());
 
         // Use multi-threaded BGZF reader for parallel decompression
         let worker_count =
@@ -111,6 +113,7 @@ impl BamBlockReader {
             .read_exact(&mut n_ref_buf)
             .context("Failed to read reference count")?;
         let n_ref = u32::from_le_bytes(n_ref_buf) as usize;
+        debug!("Reading {} reference sequences from BAM header...", n_ref);
 
         let mut ref_names = Vec::with_capacity(n_ref);
         for _ in 0..n_ref {
@@ -137,6 +140,12 @@ impl BamBlockReader {
             .iter()
             .map(|name| annotation.get_chrom_id(name))
             .collect();
+        let mapped_count = ref_to_chrom.iter().filter(|x| x.is_some()).count();
+        debug!(
+            "Mapped {}/{} BAM reference sequences to annotation chromosomes",
+            mapped_count,
+            ref_to_chrom.len()
+        );
 
         // Parse header for noodles compatibility (not strictly needed but useful)
         let header_str = String::from_utf8_lossy(&header_text);

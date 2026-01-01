@@ -51,7 +51,7 @@ impl Default for RecordBatch {
 /// BAM block reader that produces batches for parallel processing
 pub struct BamBlockReader {
     /// Underlying BGZF reader (multi-threaded for parallel decompression)
-    reader: bgzf::MultithreadedReader<File>,
+    reader: bgzf::io::MultithreadedReader<File>,
     /// BAM header
     header: sam::Header,
     /// Pre-computed ref_id -> chrom_id mapping
@@ -84,7 +84,7 @@ impl BamBlockReader {
         // Use multi-threaded BGZF reader for parallel decompression
         let worker_count =
             NonZeroUsize::new(threads.max(1)).expect("thread count must be positive");
-        let mut reader = bgzf::MultithreadedReader::with_worker_count(worker_count, file);
+        let mut reader = bgzf::io::MultithreadedReader::with_worker_count(worker_count, file);
 
         // Read BAM magic number
         let mut magic = [0u8; 4];

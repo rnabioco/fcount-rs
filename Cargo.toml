@@ -15,10 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 # BAM/SAM parsing (pure Rust)
-noodles-bam = "0.68"
-noodles-sam = "0.65"
-noodles-bgzf = { version = "0.33", features = ["libdeflate"] }
-noodles-core = "0.15"
+noodles-bam = "0.85"
+noodles-sam = "0.81"
+noodles-bgzf = { version = "0.45", features = ["libdeflate"] }
+noodles-core = "0.18"
 
 # Parallelism
 rayon = "1.10"

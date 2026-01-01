@@ -1,12 +1,13 @@
-//! Sharded concurrent mate tracker for parallel paired-end processing.
+//! Concurrent mate tracker for parallel paired-end processing.
 //!
 //! This module provides a thread-safe mate tracker that allows multiple worker
 //! threads to track and match read pairs concurrently with minimal contention.
+//! Uses DashMap for lock-free concurrent access.
 
-use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use dashmap::DashMap;
+use rustc_hash::FxHasher;
 use smallvec::SmallVec;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 
 use crate::alignment::Interval;
 
@@ -35,39 +36,49 @@ impl DeferredRead {
     }
 }
 
-/// Sharded concurrent map for mate tracking.
+/// Concurrent map for mate tracking using DashMap.
 ///
-/// Uses multiple shards (each with its own mutex) to reduce lock contention
-/// when multiple threads are inserting/retrieving mates concurrently.
+/// DashMap provides fine-grained locking with automatic sharding,
+/// significantly reducing contention compared to manual sharding.
 pub struct ShardedMateTracker {
-    shards: Vec<Mutex<FxHashMap<u64, DeferredRead>>>,
-    num_shards: usize,
+    map: DashMap<u64, DeferredRead, BuildHasherDefault<FxHasher>>,
 }
 
 impl ShardedMateTracker {
-    /// Create a new sharded mate tracker.
+    /// Create a new mate tracker.
     ///
     /// # Arguments
-    /// * `num_shards` - Number of shards (recommended: num_threads * 4)
-    pub fn new(num_shards: usize) -> Self {
-        let shards = (0..num_shards)
-            .map(|_| Mutex::new(FxHashMap::default()))
-            .collect();
-        ShardedMateTracker { shards, num_shards }
+    /// * `_num_shards` - Ignored (DashMap handles sharding internally)
+    pub fn new(_num_shards: usize) -> Self {
+        // DashMap automatically shards based on available parallelism
+        ShardedMateTracker {
+            map: DashMap::with_hasher(BuildHasherDefault::<FxHasher>::default()),
+        }
     }
 
     /// Hash a read name for lookup
     #[inline]
     pub fn hash_name(name: &[u8]) -> u64 {
-        let mut hasher = rustc_hash::FxHasher::default();
+        let mut hasher = FxHasher::default();
         name.hash(&mut hasher);
         hasher.finish()
     }
 
-    /// Get the shard index for a given name hash
+    /// Try to remove and return an existing mate.
+    ///
+    /// If a mate with this hash is pending, removes and returns it.
+    /// Otherwise returns None (caller should insert).
     #[inline]
-    fn get_shard(&self, name_hash: u64) -> usize {
-        (name_hash as usize) % self.num_shards
+    pub fn remove_mate(&self, name_hash: u64) -> Option<DeferredRead> {
+        self.map.remove(&name_hash).map(|(_, v)| v)
+    }
+
+    /// Insert a read for later mate matching.
+    ///
+    /// Call this only after `remove_mate` returns None.
+    #[inline]
+    pub fn insert(&self, name_hash: u64, read: DeferredRead) {
+        self.map.insert(name_hash, read);
     }
 
     /// Insert a read or retrieve its mate.
@@ -84,33 +95,31 @@ impl ShardedMateTracker {
     /// * `None` if this read was stored (awaiting mate)
     #[inline]
     pub fn insert_or_get(&self, name_hash: u64, read: DeferredRead) -> Option<DeferredRead> {
-        let shard_idx = self.get_shard(name_hash);
-        let mut shard = self.shards[shard_idx].lock();
-
-        if let Some(mate) = shard.remove(&name_hash) {
+        // Try to remove existing entry first (common case for second mate)
+        if let Some((_, mate)) = self.map.remove(&name_hash) {
             Some(mate)
         } else {
-            shard.insert(name_hash, read);
+            // Insert new entry (first mate)
+            self.map.insert(name_hash, read);
             None
         }
     }
 
-    /// Get the total number of pending mates across all shards.
-    ///
-    /// Note: This is approximate as shards can change during iteration.
+    /// Get the total number of pending mates.
     pub fn pending_count(&self) -> usize {
-        self.shards.iter().map(|s| s.lock().len()).sum()
+        self.map.len()
     }
 
     /// Drain all remaining pending mates.
     ///
     /// Call this after processing to handle orphan reads.
     pub fn drain_all(&self) -> Vec<(u64, DeferredRead)> {
-        let mut result = Vec::new();
-        for shard in &self.shards {
-            let mut guard = shard.lock();
-            result.extend(guard.drain());
-        }
+        let mut result = Vec::with_capacity(self.map.len());
+        // Use retain with false to drain all entries
+        self.map.retain(|k, v| {
+            result.push((*k, v.clone()));
+            false
+        });
         result
     }
 }
@@ -120,7 +129,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sharded_mate_tracking() {
+    fn test_mate_tracking() {
         let tracker = ShardedMateTracker::new(4);
 
         let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {

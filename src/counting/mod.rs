@@ -618,7 +618,7 @@ fn process_bam_parallel_paired(
     annotation: &AnnotationIndex,
     count_size: usize,
     threads_per_file: usize,
-) -> Result<(Vec<i64>, ReadCounters)> {
+) -> Result<(Vec<i64>, ReadCounters, counter::TimingStats)> {
     use crate::alignment::block_reader::RecordBatch;
     use crate::alignment::minimal_parser::MinimalRecord;
 
@@ -661,7 +661,7 @@ fn process_bam_parallel_paired(
                         );
                     }
 
-                    (counter.counts, counter.stats)
+                    (counter.counts, counter.stats, counter.timing)
                 })
             })
             .collect();
@@ -684,13 +684,15 @@ fn process_bam_parallel_paired(
         // Collect and merge results
         let mut final_counts = vec![0i64; count_size];
         let mut final_stats = ReadCounters::default();
+        let mut final_timing = counter::TimingStats::default();
 
         for handle in worker_handles {
-            let (counts, stats) = handle.join().expect("Worker thread panicked");
+            let (counts, stats, timing) = handle.join().expect("Worker thread panicked");
             for (i, &count) in counts.iter().enumerate() {
                 final_counts[i] += count;
             }
             final_stats.merge(&stats);
+            final_timing.merge(&timing);
         }
 
         // Handle orphan mates (reads whose mate was never found)
@@ -714,7 +716,7 @@ fn process_bam_parallel_paired(
             }
         }
 
-        (final_counts, final_stats)
+        (final_counts, final_stats, final_timing)
     });
 
     result.map_err(|_| anyhow::anyhow!("Scoped thread panicked"))
@@ -837,24 +839,25 @@ fn process_paired_batch(
             }
         }
 
-        // Create deferred read for mate tracking
-        let deferred = DeferredRead {
-            chrom_id,
-            start: record.pos as u32,
-            intervals: record.intervals.clone(),
-            flags: record.flags,
-            mapq: record.mapq,
-            nh: record.nh,
-        };
-
-        // Hash the read name and try to find/store mate
+        // Hash the read name and check for existing mate first
         let name_hash = ShardedMateTracker::hash_name(&record.read_name);
 
-        if let Some(mate) = mate_tracker.insert_or_get(name_hash, deferred) {
-            // Found mate - process as fragment
+        // Try to get existing mate (avoids cloning intervals if mate exists)
+        if let Some(mate) = mate_tracker.remove_mate(name_hash) {
+            // Found mate - process as fragment (no clone needed)
             process_minimal_fragment(record, chrom_id, &mate, counter, args, annotation);
+        } else {
+            // No mate yet - create deferred read and store it
+            let deferred = DeferredRead {
+                chrom_id,
+                start: record.pos as u32,
+                intervals: record.intervals.clone(),
+                flags: record.flags,
+                mapq: record.mapq,
+                nh: record.nh,
+            };
+            mate_tracker.insert(name_hash, deferred);
         }
-        // Otherwise, stored for later matching
     }
 }
 
@@ -1158,7 +1161,7 @@ pub fn count_reads_parallel_paired(
             .progress_chars("#>-"),
     );
 
-    let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
+    let results: Vec<Result<(Vec<i64>, ReadCounters, counter::TimingStats)>> = args
         .bam_files
         .par_iter()
         .map(|bam_input| {
@@ -1177,7 +1180,7 @@ pub fn count_reads_parallel_paired(
     let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
 
     for result in results {
-        let (counts, stats) = result?;
+        let (counts, stats, _timing) = result?;
         counts_per_sample.push(counts);
         stats_per_sample.push(stats);
     }

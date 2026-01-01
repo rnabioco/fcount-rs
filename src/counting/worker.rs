@@ -11,11 +11,9 @@ use crate::alignment::total_overlap;
 use crate::annotation::{AnnotationIndex, Strand};
 use crate::cli::{Args, StrandMode};
 
+use super::constants::FRACTION_MULTIPLIER;
 use super::overlap::{Assignment, FeatureHit};
 use super::stats::ReadCounters;
-
-/// Fixed-point multiplier for fractional counts
-const FRACTION_MULTIPLIER: i64 = 1_000_000;
 
 /// Worker context for processing BAM records
 pub struct Worker {

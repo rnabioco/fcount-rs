@@ -1,10 +1,7 @@
+use super::constants::FRACTION_MULTIPLIER;
 use super::overlap::{Assignment, FeatureHit};
 use super::stats::ReadCounters;
 use crate::cli::Args;
-
-/// Fixed-point multiplier for fractional counts
-/// Using 1_000_000 to maintain 6 decimal places of precision
-const FRACTION_MULTIPLIER: i64 = 1_000_000;
 
 /// Thread-local counter for accumulating counts
 #[derive(Debug)]

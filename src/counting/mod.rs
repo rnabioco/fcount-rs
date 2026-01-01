@@ -5,7 +5,6 @@ mod stats;
 mod worker;
 
 pub use counter::ThreadCounter;
-pub use overlap::Assignment;
 pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
 pub use stats::ReadCounters;
 
@@ -161,6 +160,18 @@ fn process_bam_file(
         }
     }
 
+    // Handle orphan mates (reads whose mate was never found)
+    if let Some(mut tracker) = mate_tracker {
+        let orphan_count = tracker.pending_count();
+        if orphan_count > 0 {
+            log::debug!("{} orphan mates remaining after processing", orphan_count);
+            // Process orphans as single-end reads
+            for mate in tracker.drain() {
+                process_orphan_mate(&mate, &mut counter, args, annotation);
+            }
+        }
+    }
+
     Ok((counter.counts, counter.stats))
 }
 
@@ -181,30 +192,36 @@ fn process_single_read(
     // Find overlapping features using callback-based query (no allocation)
     counter.hit_buffer.clear();
     for interval in &record.intervals {
-        annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
-            // Check strand if stranded mode
-            if !overlap::check_strand(record, feature, args) {
-                return;
-            }
+        annotation.query_overlapping(
+            chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
+                // Check strand if stranded mode
+                if !overlap::check_strand(record, feature, args) {
+                    return;
+                }
 
-            // Calculate overlap if needed
-            let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-            } else {
-                1
-            };
+                // Calculate overlap if needed
+                let overlap_len = if args.need_overlap_length() {
+                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                } else {
+                    1
+                };
 
-            // Check minimum overlap
-            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                return;
-            }
+                // Check minimum overlap
+                if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args)
+                {
+                    return;
+                }
 
-            counter.hit_buffer.push(overlap::FeatureHit {
-                feature_idx: feat_idx,
-                gene_id: feature.gene_id,
-                overlap_len,
-            });
-        });
+                counter.hit_buffer.push(overlap::FeatureHit {
+                    feature_idx: feat_idx,
+                    gene_id: feature.gene_id,
+                    overlap_len,
+                });
+            },
+        );
     }
 
     // Assign read
@@ -243,8 +260,8 @@ fn process_paired_read(
         }
     };
 
-    // Check for chimeric reads
-    if record.mate_chrom_id != record.chrom_id && !args.count_chimeric {
+    // Check for chimeric reads (mates on different chromosomes)
+    if record.mate_chrom_id != record.chrom_id && args.no_chimeric {
         counter.stats.unassigned_chimeric += 1;
         return;
     }
@@ -287,43 +304,11 @@ fn process_fragment(
 
     // Hits from current record
     for interval in &record.intervals {
-        annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
-            if !overlap::check_strand_paired(record, mate, feature, args) {
-                return;
-            }
-
-            let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-                    + crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
-            } else {
-                1
-            };
-
-            if !overlap::check_overlap_thresholds(overlap_len, &record.intervals, feature, args) {
-                return;
-            }
-
-            counter.hit_buffer.push(overlap::FeatureHit {
-                feature_idx: feat_idx,
-                gene_id: feature.gene_id,
-                overlap_len,
-            });
-        });
-    }
-
-    // Hits from mate (if on same chromosome)
-    if mate.chrom_id == chrom_id {
-        // Build set of already-seen features for O(1) duplicate check
-        let seen_features: rustc_hash::FxHashSet<u32> =
-            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
-
-        for interval in &mate.intervals {
-            annotation.query_overlapping(chrom_id, interval.start, interval.end, |feat_idx, feature| {
-                // Skip if already counted - O(1) lookup
-                if seen_features.contains(&feat_idx) {
-                    return;
-                }
-
+        annotation.query_overlapping(
+            chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
                 if !overlap::check_strand_paired(record, mate, feature, args) {
                     return;
                 }
@@ -349,13 +334,115 @@ fn process_fragment(
                     gene_id: feature.gene_id,
                     overlap_len,
                 });
-            });
+            },
+        );
+    }
+
+    // Hits from mate (if on same chromosome)
+    if mate.chrom_id == chrom_id {
+        // Build set of already-seen features for O(1) duplicate check
+        let seen_features: rustc_hash::FxHashSet<u32> =
+            counter.hit_buffer.iter().map(|h| h.feature_idx).collect();
+
+        for interval in &mate.intervals {
+            annotation.query_overlapping(
+                chrom_id,
+                interval.start,
+                interval.end,
+                |feat_idx, feature| {
+                    // Skip if already counted - O(1) lookup
+                    if seen_features.contains(&feat_idx) {
+                        return;
+                    }
+
+                    if !overlap::check_strand_paired(record, mate, feature, args) {
+                        return;
+                    }
+
+                    let overlap_len = if args.need_overlap_length() {
+                        crate::alignment::total_overlap(
+                            &record.intervals,
+                            feature.start,
+                            feature.end,
+                        ) + crate::alignment::total_overlap(
+                            &mate.intervals,
+                            feature.start,
+                            feature.end,
+                        )
+                    } else {
+                        1
+                    };
+
+                    if !overlap::check_overlap_thresholds(
+                        overlap_len,
+                        &record.intervals,
+                        feature,
+                        args,
+                    ) {
+                        return;
+                    }
+
+                    counter.hit_buffer.push(overlap::FeatureHit {
+                        feature_idx: feat_idx,
+                        gene_id: feature.gene_id,
+                        overlap_len,
+                    });
+                },
+            );
         }
     }
 
     // Assign fragment
     let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
     counter.apply_assignment(assignment, record.nh.max(mate.nh), args);
+}
+
+/// Process an orphan mate (read whose mate was never found) as single-end
+fn process_orphan_mate(
+    mate: &PendingMate,
+    counter: &mut ThreadCounter,
+    args: &Args,
+    annotation: &AnnotationIndex,
+) {
+    counter.hit_buffer.clear();
+
+    for interval in &mate.intervals {
+        annotation.query_overlapping(
+            mate.chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
+                // Check strand
+                let mate_strand = if mate.is_reverse_strand() {
+                    crate::annotation::Strand::Reverse
+                } else {
+                    crate::annotation::Strand::Forward
+                };
+                if !overlap::check_strand_with_strand(mate_strand, feature, args) {
+                    return;
+                }
+
+                let overlap_len = if args.need_overlap_length() {
+                    crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
+                } else {
+                    1
+                };
+
+                if !overlap::check_overlap_thresholds(overlap_len, &mate.intervals, feature, args) {
+                    return;
+                }
+
+                counter.hit_buffer.push(overlap::FeatureHit {
+                    feature_idx: feat_idx,
+                    gene_id: feature.gene_id,
+                    overlap_len,
+                });
+            },
+        );
+    }
+
+    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
+    counter.apply_assignment(assignment, mate.nh, args);
 }
 
 /// Process a single BAM file using parallel producer-consumer pattern
@@ -461,9 +548,16 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result = process_bam_parallel(bam_path, args, annotation, count_size, threads_per_file);
+            let result =
+                process_bam_parallel(bam_path, args, annotation, count_size, threads_per_file);
             pb.inc(1);
-            pb.set_message(bam_path.file_name().unwrap_or_default().to_string_lossy().to_string());
+            pb.set_message(
+                bam_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
             result
         })
         .collect();
@@ -701,7 +795,7 @@ fn process_paired_batch(
             continue;
         }
 
-        // Check for chimeric reads
+        // Check for chimeric reads (mates on different chromosomes)
         let mate_chrom_id =
             if record.mate_ref_id >= 0 && (record.mate_ref_id as usize) < ref_to_chrom.len() {
                 ref_to_chrom[record.mate_ref_id as usize]
@@ -709,9 +803,13 @@ fn process_paired_batch(
                 None
             };
 
-        if mate_chrom_id != Some(chrom_id) && !args.count_chimeric {
-            counter.stats.unassigned_chimeric += 1;
-            continue;
+        // Only mark as chimeric if both chromosomes are in annotation AND different
+        // If mate_chrom_id is None, mate is on chromosome not in annotation - not chimeric
+        if let Some(mate_chrom) = mate_chrom_id {
+            if mate_chrom != chrom_id && args.no_chimeric {
+                counter.stats.unassigned_chimeric += 1;
+                continue;
+            }
         }
 
         // Create deferred read for mate tracking
@@ -931,34 +1029,48 @@ fn process_deferred_as_single(
     };
 
     for interval in &deferred.intervals {
-        annotation.query_overlapping(deferred.chrom_id, interval.start, interval.end, |feat_idx, feature| {
-            if !overlap::check_strand_with_strand(deferred_strand, feature, args) {
-                return;
-            }
+        annotation.query_overlapping(
+            deferred.chrom_id,
+            interval.start,
+            interval.end,
+            |feat_idx, feature| {
+                if !overlap::check_strand_with_strand(deferred_strand, feature, args) {
+                    return;
+                }
 
-            let overlap_len = if args.need_overlap_length() {
-                crate::alignment::total_overlap(&deferred.intervals, feature.start, feature.end)
-            } else {
-                1
-            };
+                let overlap_len = if args.need_overlap_length() {
+                    crate::alignment::total_overlap(&deferred.intervals, feature.start, feature.end)
+                } else {
+                    1
+                };
 
-            if !overlap::check_overlap_thresholds(overlap_len, &deferred.intervals, feature, args) {
-                return;
-            }
+                if !overlap::check_overlap_thresholds(
+                    overlap_len,
+                    &deferred.intervals,
+                    feature,
+                    args,
+                ) {
+                    return;
+                }
 
-            hit_buffer.push(overlap::FeatureHit {
-                feature_idx: feat_idx,
-                gene_id: feature.gene_id,
-                overlap_len,
-            });
-        });
+                hit_buffer.push(overlap::FeatureHit {
+                    feature_idx: feat_idx,
+                    gene_id: feature.gene_id,
+                    overlap_len,
+                });
+            },
+        );
     }
 
     let assignment = overlap::resolve_assignment(&hit_buffer, args);
 
     // Apply assignment directly to counts/stats
     // Use same counting as ThreadCounter (1 for non-fractional, 1_000_000 for fractional)
-    let count_value = if args.fractional_counting { 1_000_000 } else { 1 };
+    let count_value = if args.fractional_counting {
+        1_000_000
+    } else {
+        1
+    };
 
     match assignment {
         overlap::Assignment::Unique(hit) => {
@@ -1026,10 +1138,21 @@ pub fn count_reads_parallel_paired(
         .bam_files
         .par_iter()
         .map(|bam_path| {
-            let result =
-                process_bam_parallel_paired(bam_path, args, annotation, count_size, threads_per_file);
+            let result = process_bam_parallel_paired(
+                bam_path,
+                args,
+                annotation,
+                count_size,
+                threads_per_file,
+            );
             pb.inc(1);
-            pb.set_message(bam_path.file_name().unwrap_or_default().to_string_lossy().to_string());
+            pb.set_message(
+                bam_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            );
             result
         })
         .collect();

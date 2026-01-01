@@ -129,6 +129,11 @@ impl MateTracker {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
+
+    /// Drain all pending mates, returning an iterator
+    pub fn drain(&mut self) -> impl Iterator<Item = PendingMate> + '_ {
+        self.pending.drain().map(|(_, mate)| mate)
+    }
 }
 
 #[cfg(test)]

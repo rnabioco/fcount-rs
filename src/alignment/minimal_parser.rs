@@ -296,10 +296,10 @@ fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interv
 
             // Skip (intron): ends current interval
             CIGAR_N => {
-                if let Some(interval) = current_interval.take() {
-                    if interval.end >= interval.start {
-                        out.push(interval);
-                    }
+                if let Some(interval) = current_interval.take()
+                    && interval.end >= interval.start
+                {
+                    out.push(interval);
                 }
                 ref_pos += op_len;
             }
@@ -315,10 +315,10 @@ fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interv
     }
 
     // Save final interval
-    if let Some(interval) = current_interval {
-        if interval.end >= interval.start {
-            out.push(interval);
-        }
+    if let Some(interval) = current_interval
+        && interval.end >= interval.start
+    {
+        out.push(interval);
     }
 }
 

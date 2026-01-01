@@ -110,10 +110,10 @@ where
             // Skip (intron): ends current interval, jumps reference position
             Kind::Skip => {
                 // Save current interval if exists
-                if let Some(interval) = current_interval.take() {
-                    if !interval.is_empty() {
-                        out.push(interval);
-                    }
+                if let Some(interval) = current_interval.take()
+                    && !interval.is_empty()
+                {
+                    out.push(interval);
                 }
                 ref_pos += len;
             }
@@ -129,10 +129,10 @@ where
     }
 
     // Save final interval
-    if let Some(interval) = current_interval {
-        if !interval.is_empty() {
-            out.push(interval);
-        }
+    if let Some(interval) = current_interval
+        && !interval.is_empty()
+    {
+        out.push(interval);
     }
 }
 

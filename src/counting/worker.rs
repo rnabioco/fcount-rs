@@ -244,7 +244,7 @@ impl Worker {
         }
 
         if self.hit_buffer.len() == 1 {
-            return Assignment::Unique(self.hit_buffer[0].clone());
+            return Assignment::Unique(self.hit_buffer[0]);
         }
 
         // Group hits by gene
@@ -261,9 +261,9 @@ impl Worker {
                     .iter()
                     .max_by_key(|h| h.overlap_len)
                     .unwrap();
-                return Assignment::Unique(best.clone());
+                return Assignment::Unique(*best);
             }
-            return Assignment::Unique(self.hit_buffer[0].clone());
+            return Assignment::Unique(self.hit_buffer[0]);
         }
 
         // Multiple genes

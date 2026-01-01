@@ -262,8 +262,13 @@ impl BamBlockReader {
             }
 
             // Parse this record
-            if parse_bam_record(&data[data_start..data_end], record, need_read_name, need_nh_tag)
-                .is_ok()
+            if parse_bam_record(
+                &data[data_start..data_end],
+                record,
+                need_read_name,
+                need_nh_tag,
+            )
+            .is_ok()
             {
                 callback(record);
             }

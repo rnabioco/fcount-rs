@@ -1,4 +1,3 @@
-use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::alignment::{AlignmentRecord, Interval, PendingMate};
@@ -252,7 +251,7 @@ mod tests {
             feature_level: false,
             paired_end: false,
             require_both_aligned: false,
-            count_chimeric: false,
+            no_chimeric: false,
             strand_mode: 0,
             count_multi_mapping: false,
             fractional_counting: false,

@@ -32,7 +32,7 @@ fn default_args() -> Args {
         threads: 1,
         details_file: None,
         quiet: false,
-        count_chimeric: false,
+        no_chimeric: false,
     }
 }
 
@@ -79,10 +79,26 @@ fn test_strand_check_unstranded() {
     };
 
     // In unstranded mode, both should pass regardless of read strand
-    assert!(overlap::check_strand_with_strand(Strand::Forward, &forward_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Reverse, &forward_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Forward, &reverse_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Reverse, &reverse_feature, &args));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Forward,
+        &forward_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &forward_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Forward,
+        &reverse_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &reverse_feature,
+        &args
+    ));
 }
 
 #[test]
@@ -107,10 +123,26 @@ fn test_strand_check_stranded() {
     };
 
     // In stranded mode, read strand must match feature strand
-    assert!(overlap::check_strand_with_strand(Strand::Forward, &forward_feature, &args));
-    assert!(!overlap::check_strand_with_strand(Strand::Reverse, &forward_feature, &args));
-    assert!(!overlap::check_strand_with_strand(Strand::Forward, &reverse_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Reverse, &reverse_feature, &args));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Forward,
+        &forward_feature,
+        &args
+    ));
+    assert!(!overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &forward_feature,
+        &args
+    ));
+    assert!(!overlap::check_strand_with_strand(
+        Strand::Forward,
+        &reverse_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &reverse_feature,
+        &args
+    ));
 }
 
 #[test]
@@ -135,10 +167,26 @@ fn test_strand_check_reversely_stranded() {
     };
 
     // In reversely stranded mode, read strand must be opposite to feature strand
-    assert!(!overlap::check_strand_with_strand(Strand::Forward, &forward_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Reverse, &forward_feature, &args));
-    assert!(overlap::check_strand_with_strand(Strand::Forward, &reverse_feature, &args));
-    assert!(!overlap::check_strand_with_strand(Strand::Reverse, &reverse_feature, &args));
+    assert!(!overlap::check_strand_with_strand(
+        Strand::Forward,
+        &forward_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &forward_feature,
+        &args
+    ));
+    assert!(overlap::check_strand_with_strand(
+        Strand::Forward,
+        &reverse_feature,
+        &args
+    ));
+    assert!(!overlap::check_strand_with_strand(
+        Strand::Reverse,
+        &reverse_feature,
+        &args
+    ));
 }
 
 // =============================================================================
@@ -172,8 +220,16 @@ fn test_multiple_hits_same_gene_returns_unique() {
     let args = default_args();
     // Two features from the same gene
     let hits = vec![
-        FeatureHit { feature_idx: 0, gene_id: 0, overlap_len: 50 },
-        FeatureHit { feature_idx: 1, gene_id: 0, overlap_len: 50 },
+        FeatureHit {
+            feature_idx: 0,
+            gene_id: 0,
+            overlap_len: 50,
+        },
+        FeatureHit {
+            feature_idx: 1,
+            gene_id: 0,
+            overlap_len: 50,
+        },
     ];
 
     let assignment = overlap::resolve_assignment(&hits, &args);
@@ -183,10 +239,18 @@ fn test_multiple_hits_same_gene_returns_unique() {
 #[test]
 fn test_multiple_genes_without_multi_overlap_returns_ambiguous() {
     let args = default_args(); // allow_multi_overlap = false
-    // Two features from different genes
+                               // Two features from different genes
     let hits = vec![
-        FeatureHit { feature_idx: 0, gene_id: 0, overlap_len: 50 },
-        FeatureHit { feature_idx: 1, gene_id: 1, overlap_len: 50 },
+        FeatureHit {
+            feature_idx: 0,
+            gene_id: 0,
+            overlap_len: 50,
+        },
+        FeatureHit {
+            feature_idx: 1,
+            gene_id: 1,
+            overlap_len: 50,
+        },
     ];
 
     let assignment = overlap::resolve_assignment(&hits, &args);
@@ -199,8 +263,16 @@ fn test_multiple_genes_with_multi_overlap_returns_multi() {
     args.allow_multi_overlap = true;
 
     let hits = vec![
-        FeatureHit { feature_idx: 0, gene_id: 0, overlap_len: 50 },
-        FeatureHit { feature_idx: 1, gene_id: 1, overlap_len: 50 },
+        FeatureHit {
+            feature_idx: 0,
+            gene_id: 0,
+            overlap_len: 50,
+        },
+        FeatureHit {
+            feature_idx: 1,
+            gene_id: 1,
+            overlap_len: 50,
+        },
     ];
 
     let assignment = overlap::resolve_assignment(&hits, &args);
@@ -218,8 +290,16 @@ fn test_largest_overlap_only() {
     args.largest_overlap_only = true;
 
     let hits = vec![
-        FeatureHit { feature_idx: 0, gene_id: 0, overlap_len: 30 },
-        FeatureHit { feature_idx: 1, gene_id: 1, overlap_len: 70 },
+        FeatureHit {
+            feature_idx: 0,
+            gene_id: 0,
+            overlap_len: 30,
+        },
+        FeatureHit {
+            feature_idx: 1,
+            gene_id: 1,
+            overlap_len: 70,
+        },
     ];
 
     let assignment = overlap::resolve_assignment(&hits, &args);
@@ -240,8 +320,16 @@ fn test_largest_overlap_tie_returns_multi() {
     args.largest_overlap_only = true;
 
     let hits = vec![
-        FeatureHit { feature_idx: 0, gene_id: 0, overlap_len: 50 },
-        FeatureHit { feature_idx: 1, gene_id: 1, overlap_len: 50 },
+        FeatureHit {
+            feature_idx: 0,
+            gene_id: 0,
+            overlap_len: 50,
+        },
+        FeatureHit {
+            feature_idx: 1,
+            gene_id: 1,
+            overlap_len: 50,
+        },
     ];
 
     let assignment = overlap::resolve_assignment(&hits, &args);
@@ -309,16 +397,25 @@ fn test_min_overlap_bases_filter() {
         strand: Strand::Forward,
     };
 
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval { start: 100, end: 130 }];
+    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        start: 100,
+        end: 130
+    }];
 
     // 30 bp overlap, less than 50 required
-    assert!(!overlap::check_overlap_thresholds(30, &intervals, &feature, &args));
+    assert!(!overlap::check_overlap_thresholds(
+        30, &intervals, &feature, &args
+    ));
 
     // 50 bp overlap, exactly enough
-    assert!(overlap::check_overlap_thresholds(50, &intervals, &feature, &args));
+    assert!(overlap::check_overlap_thresholds(
+        50, &intervals, &feature, &args
+    ));
 
     // 100 bp overlap, more than enough
-    assert!(overlap::check_overlap_thresholds(100, &intervals, &feature, &args));
+    assert!(overlap::check_overlap_thresholds(
+        100, &intervals, &feature, &args
+    ));
 }
 
 #[test]
@@ -338,16 +435,25 @@ fn test_min_overlap_fraction_filter() {
     };
 
     // 100bp read
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval { start: 100, end: 199 }];
+    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        start: 100,
+        end: 199
+    }];
 
     // 40bp overlap = 40% of 100bp read - should fail
-    assert!(!overlap::check_overlap_thresholds(40, &intervals, &feature, &args));
+    assert!(!overlap::check_overlap_thresholds(
+        40, &intervals, &feature, &args
+    ));
 
     // 50bp overlap = 50% of 100bp read - should pass
-    assert!(overlap::check_overlap_thresholds(50, &intervals, &feature, &args));
+    assert!(overlap::check_overlap_thresholds(
+        50, &intervals, &feature, &args
+    ));
 
     // 80bp overlap = 80% of 100bp read - should pass
-    assert!(overlap::check_overlap_thresholds(80, &intervals, &feature, &args));
+    assert!(overlap::check_overlap_thresholds(
+        80, &intervals, &feature, &args
+    ));
 }
 
 #[test]
@@ -367,11 +473,18 @@ fn test_min_feature_overlap_fraction_filter() {
         strand: Strand::Forward,
     };
 
-    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval { start: 100, end: 149 }];
+    let intervals: SmallVec<[Interval; 4]> = smallvec::smallvec![Interval {
+        start: 100,
+        end: 149
+    }];
 
     // 40bp overlap = 40% of 100bp feature - should fail
-    assert!(!overlap::check_overlap_thresholds(40, &intervals, &feature, &args));
+    assert!(!overlap::check_overlap_thresholds(
+        40, &intervals, &feature, &args
+    ));
 
     // 50bp overlap = 50% of 100bp feature - should pass
-    assert!(overlap::check_overlap_thresholds(50, &intervals, &feature, &args));
+    assert!(overlap::check_overlap_thresholds(
+        50, &intervals, &feature, &args
+    ));
 }

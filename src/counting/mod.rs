@@ -890,10 +890,11 @@ fn process_paired_batch(
             process_minimal_fragment(record, chrom_id, &mate, counter, args, annotation);
         } else {
             // No mate yet - create deferred read and store it
+            // Use std::mem::take for zero-cost move (record.intervals cleared on next parse anyway)
             let deferred = DeferredRead {
                 chrom_id,
                 start: record.pos as u32,
-                intervals: record.intervals.clone(),
+                intervals: std::mem::take(&mut record.intervals),
                 flags: record.flags,
                 mapq: record.mapq,
                 nh: record.nh,

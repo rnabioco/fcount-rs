@@ -57,7 +57,11 @@ impl ThreadCounter {
             counts: vec![0; size],
             stats: ReadCounters::default(),
             hit_buffer: Vec::with_capacity(8),
-            seen_features: rustc_hash::FxHashSet::default(),
+            // Pre-size to avoid reallocation during fragment processing
+            seen_features: rustc_hash::FxHashSet::with_capacity_and_hasher(
+                16,
+                Default::default(),
+            ),
             use_fractional: args.fractional_counting,
             feature_level: args.feature_level,
             timing: TimingStats::default(),

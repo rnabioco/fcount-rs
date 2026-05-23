@@ -9,32 +9,31 @@ use crate::annotation::AnnotationIndex;
 use crate::cli::{Args, OutputFormat};
 use crate::counting::CountResult;
 
-/// Calculate collapsed (non-overlapping) length from a set of intervals.
-/// Uses 1-based inclusive coordinates to match featureCounts.
-fn calculate_collapsed_length(intervals: &[(u32, u32)]) -> u32 {
+/// Sort + merge `intervals` in place and return the collapsed length
+/// (sum of merged interval lengths). Uses 1-based inclusive coordinates
+/// to match featureCounts.
+///
+/// In-place variant lets callers reuse a single scratch `Vec` across all
+/// genes instead of allocating per call.
+fn collapsed_length_inplace(intervals: &mut Vec<(u32, u32)>) -> u32 {
     if intervals.is_empty() {
         return 0;
     }
+    intervals.sort_unstable_by_key(|&(start, _)| start);
 
-    // Sort by start position
-    let mut sorted: Vec<(u32, u32)> = intervals.to_vec();
-    sorted.sort_by_key(|&(start, _)| start);
-
-    // Merge overlapping/adjacent intervals
-    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(sorted.len());
-    for (start, end) in sorted {
-        if let Some(last) = merged.last_mut() {
-            // Merge if overlapping or adjacent (start <= prev_end + 1)
-            if start <= last.1 + 1 {
-                last.1 = last.1.max(end);
-                continue;
-            }
+    let mut write_idx = 0;
+    for read_idx in 1..intervals.len() {
+        let (start, end) = intervals[read_idx];
+        let last = intervals[write_idx];
+        if start <= last.1 + 1 {
+            intervals[write_idx].1 = last.1.max(end);
+        } else {
+            write_idx += 1;
+            intervals[write_idx] = (start, end);
         }
-        merged.push((start, end));
     }
-
-    // Sum lengths using 1-based inclusive: end - start + 1
-    merged.iter().map(|&(s, e)| e - s + 1).sum()
+    intervals.truncate(write_idx + 1);
+    intervals.iter().map(|&(s, e)| e - s + 1).sum()
 }
 
 /// Write count matrix to output file (gzipped if filename ends in .gz)
@@ -153,20 +152,17 @@ fn write_dexseq_format<W: Write>(
         let exon_num = gene_exon_counts.entry(feature.gene_id).or_insert(0);
         *exon_num += 1;
 
-        let exon_id = format!("{}:E{:03}", gene_name, exon_num);
+        // Stream gene_id and exon_id (gene_name:E### with zero-padded number)
+        // directly — `format!` here would allocate a String per feature.
+        write!(writer, "{}\t{}:E{:03}", gene_name, gene_name, exon_num)?;
 
-        // Write gene_id and exon_id
-        write!(writer, "{}\t{}", gene_name, exon_id)?;
-
-        // Write count for each sample
         for sample_counts in &result.counts_per_sample {
             let count = sample_counts.get(feat_idx).copied().unwrap_or(0);
-            let count_str = if args.fractional_counting {
-                format!("{:.6}", count as f64 / 1_000_000.0)
+            if args.fractional_counting {
+                write!(writer, "\t{:.6}", count as f64 / 1_000_000.0)?;
             } else {
-                count.to_string()
-            };
-            write!(writer, "\t{}", count_str)?;
+                write!(writer, "\t{}", count)?;
+            }
         }
 
         writeln!(writer)?;
@@ -187,79 +183,82 @@ fn write_gene_level<W: Write>(
         gene_to_features[feature.gene_id as usize].push(feat_idx);
     }
 
-    // Now iterate genes with pre-computed feature indices
+    // Scratch buffer reused for every gene's collapsed-length calc.
+    let mut interval_scratch: Vec<(u32, u32)> = Vec::with_capacity(32);
+
     for (gene_idx, gene_name) in annotation.gene_names.iter().enumerate() {
         let feature_indices = &gene_to_features[gene_idx];
         if feature_indices.is_empty() {
             continue;
         }
 
-        // Collect chromosome(s) - one per feature to match featureCounts format
-        let chroms: Vec<_> = feature_indices
-            .iter()
-            .filter_map(|&idx| {
-                let chrom_id = annotation.features[idx].chrom_id;
-                annotation
-                    .id_to_chrom
-                    .get(chrom_id as usize)
-                    .map(|s| s.as_ref())
-            })
-            .collect();
-        let chrom_str = chroms.join(";");
+        // Geneid
+        writer.write_all(gene_name.as_bytes())?;
+        writer.write_all(b"\t")?;
 
-        // Collect starts
-        let starts: Vec<_> = feature_indices
-            .iter()
-            .map(|&idx| annotation.features[idx].start.to_string())
-            .collect();
-        let starts_str = starts.join(";");
+        // Chr — semicolon-separated, streamed directly (no Vec<&str> + join).
+        for (i, &idx) in feature_indices.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b";")?;
+            }
+            let chrom_id = annotation.features[idx].chrom_id;
+            if let Some(name) = annotation.id_to_chrom.get(chrom_id as usize) {
+                writer.write_all(name.as_bytes())?;
+            }
+        }
+        writer.write_all(b"\t")?;
 
-        // Collect ends
-        let ends: Vec<_> = feature_indices
-            .iter()
-            .map(|&idx| annotation.features[idx].end.to_string())
-            .collect();
-        let ends_str = ends.join(";");
+        // Start
+        for (i, &idx) in feature_indices.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b";")?;
+            }
+            write!(writer, "{}", annotation.features[idx].start)?;
+        }
+        writer.write_all(b"\t")?;
 
-        // Strand - one per feature to match featureCounts format
-        let strands: Vec<_> = feature_indices
-            .iter()
-            .map(|&idx| match annotation.features[idx].strand {
-                crate::annotation::Strand::Forward => "+",
-                crate::annotation::Strand::Reverse => "-",
-                crate::annotation::Strand::Unknown => ".",
-            })
-            .collect();
-        let strand_str = strands.join(";");
+        // End
+        for (i, &idx) in feature_indices.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b";")?;
+            }
+            write!(writer, "{}", annotation.features[idx].end)?;
+        }
+        writer.write_all(b"\t")?;
 
-        // Length: collapsed (non-overlapping) length to match featureCounts
-        let intervals: Vec<(u32, u32)> = feature_indices
-            .iter()
-            .map(|&idx| {
-                let f = &annotation.features[idx];
-                (f.start, f.end)
-            })
-            .collect();
-        let length = calculate_collapsed_length(&intervals);
+        // Strand
+        for (i, &idx) in feature_indices.iter().enumerate() {
+            if i > 0 {
+                writer.write_all(b";")?;
+            }
+            let s: &[u8] = match annotation.features[idx].strand {
+                crate::annotation::Strand::Forward => b"+",
+                crate::annotation::Strand::Reverse => b"-",
+                crate::annotation::Strand::Unknown => b".",
+            };
+            writer.write_all(s)?;
+        }
+        writer.write_all(b"\t")?;
 
-        // Write gene metadata
-        write!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}",
-            gene_name, chrom_str, starts_str, ends_str, strand_str, length
-        )?;
+        // Length (collapsed, computed via reused scratch buffer)
+        interval_scratch.clear();
+        for &idx in feature_indices {
+            let f = &annotation.features[idx];
+            interval_scratch.push((f.start, f.end));
+        }
+        let length = collapsed_length_inplace(&mut interval_scratch);
+        write!(writer, "{}", length)?;
 
-        // Write counts for each sample
+        // Counts — write directly, no intermediate String per cell.
         for sample_counts in &result.counts_per_sample {
             let count = sample_counts.get(gene_idx).copied().unwrap_or(0);
-            let count_str = if args.fractional_counting {
-                format!("{:.6}", count as f64 / 1_000_000.0)
+            if args.fractional_counting {
+                write!(writer, "\t{:.6}", count as f64 / 1_000_000.0)?;
             } else {
-                count.to_string()
-            };
-            write!(writer, "\t{}", count_str)?;
+                write!(writer, "\t{}", count)?;
+            }
         }
-        writeln!(writer)?;
+        writer.write_all(b"\n")?;
     }
 
     Ok(())
@@ -302,15 +301,13 @@ fn write_feature_level<W: Write>(
             feature.len()
         )?;
 
-        // Write counts for each sample
         for sample_counts in &result.counts_per_sample {
             let count = sample_counts.get(feat_idx).copied().unwrap_or(0);
-            let count_str = if args.fractional_counting {
-                format!("{:.6}", count as f64 / 1_000_000.0)
+            if args.fractional_counting {
+                write!(writer, "\t{:.6}", count as f64 / 1_000_000.0)?;
             } else {
-                count.to_string()
-            };
-            write!(writer, "\t{}", count_str)?;
+                write!(writer, "\t{}", count)?;
+            }
         }
         writeln!(writer)?;
     }

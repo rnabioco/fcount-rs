@@ -57,6 +57,14 @@ fn main() -> Result<()> {
     let effective_threads = args.effective_threads();
     args.threads = effective_threads;
 
+    // Size the global rayon pool to the user's thread budget *before* anything
+    // that uses rayon — including parallel GTF parsing. Otherwise rayon
+    // auto-initializes to all available cores on first use and `-t` becomes a
+    // suggestion rather than a budget.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(effective_threads)
+        .build_global();
+
     // Auto-detect paired-end mode from first BAM file
     if !args.paired_end && !args.bam_files.is_empty() {
         match detect_paired_end(&args.bam_files[0].path) {

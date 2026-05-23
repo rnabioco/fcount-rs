@@ -7,7 +7,7 @@ mod stats;
 mod worker;
 
 pub use constants::{
-    FRACTION_MULTIPLIER, channel_buffer_size, mate_tracker_shards, threads_per_file,
+    FRACTION_MULTIPLIER, channel_buffer_size, mate_tracker_shards, threads_per_file_for,
 };
 pub use filtering::Filterable;
 
@@ -597,7 +597,7 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
 
     // Process BAM files in parallel
     let num_files = args.bam_files.len();
-    let tpf = threads_per_file(args.threads);
+    let tpf = threads_per_file_for(args.threads, num_files);
 
     // Create progress bar
     let pb = ProgressBar::new(num_files as u64);
@@ -1222,7 +1222,7 @@ pub fn count_reads_parallel_paired(
 
     // Process BAM files in parallel
     let num_files = args.bam_files.len();
-    let tpf = threads_per_file(args.threads);
+    let tpf = threads_per_file_for(args.threads, num_files);
 
     // Create progress bar
     let pb = ProgressBar::new(num_files as u64);

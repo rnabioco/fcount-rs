@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     // Use parallel processing when multiple threads are available
     let bam_start = Instant::now();
     let num_files = args.bam_files.len();
-    let threads_per_file = 4.min(args.threads).max(1);
+    let threads_per_file = counting::threads_per_file_for(args.threads, num_files);
     let counts = if args.threads > 1 {
         if args.paired_end {
             info!(

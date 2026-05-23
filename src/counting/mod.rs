@@ -531,20 +531,21 @@ fn process_bam_parallel(
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
-        // Spawn workers - each gets its own clone of annotation for cache locality
+        // Spawn workers — all share the borrowed annotation index. Cloning it
+        // per thread (the previous comment claimed "cache locality") actually
+        // duplicates the COITree N times and pushes the working set out of L3.
         let worker_handles: Vec<_> = (0..num_workers)
             .map(|_| {
                 let rx = rx.clone();
                 let ref_to_chrom_arc = Arc::clone(&ref_to_chrom_arc);
                 let args_arc = Arc::clone(&args_arc);
-                let local_annotation = annotation.clone(); // Per-thread copy for cache locality
 
                 scope.spawn(move |_| {
                     let mut worker = Worker::new(count_size, ref_to_chrom_arc, args_arc);
 
                     // Process batches until channel closes
                     while let Ok(batch) = rx.recv() {
-                        worker.process_batch(&batch, &local_annotation);
+                        worker.process_batch(&batch, annotation);
                     }
 
                     worker.into_results()

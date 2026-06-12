@@ -1,7 +1,6 @@
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
-use crate::alignment::{AlignmentRecord, PendingMate};
 use crate::annotation::{Feature, Strand};
 use crate::cli::{Args, StrandMode};
 
@@ -87,57 +86,6 @@ pub fn check_strand_fast(expected: Option<Strand>, feature_strand: Strand) -> bo
     }
 }
 
-/// Check if read strand matches feature strand for single-end reads.
-#[inline]
-pub fn check_strand(record: &AlignmentRecord, feature: &Feature, args: &Args) -> bool {
-    let read_strand = strand_from_reverse(record.is_reverse_strand());
-    let expected = apply_strand_mode(read_strand, args.strand_mode());
-    is_strand_compatible(expected, feature.strand)
-}
-
-/// Check if fragment strand matches feature strand for paired-end reads.
-///
-/// For stranded protocols, the first read determines the fragment strand.
-/// For reversely stranded protocols, the second read determines the strand.
-#[inline]
-pub fn check_strand_paired(
-    record: &AlignmentRecord,
-    mate: &PendingMate,
-    feature: &Feature,
-    args: &Args,
-) -> bool {
-    let mode = args.strand_mode();
-    if mode == StrandMode::Unstranded {
-        return true;
-    }
-
-    // Determine which read's strand to use based on protocol
-    let fragment_strand = match mode {
-        StrandMode::Stranded => {
-            // First read determines strand
-            let first_read_reverse = if record.is_first_in_pair() {
-                record.is_reverse_strand()
-            } else {
-                mate.is_reverse_strand()
-            };
-            strand_from_reverse(first_read_reverse)
-        }
-        StrandMode::ReverselyStranded => {
-            // Second read determines strand (reversed)
-            let second_read_reverse = if record.is_second_in_pair() {
-                record.is_reverse_strand()
-            } else {
-                mate.is_reverse_strand()
-            };
-            // For reversely stranded, flip the strand
-            strand_from_reverse(!second_read_reverse)
-        }
-        StrandMode::Unstranded => unreachable!(),
-    };
-
-    is_strand_compatible(fragment_strand, feature.strand)
-}
-
 /// Check strand compatibility using Strand enum directly (for parallel processing).
 #[inline(always)]
 pub fn check_strand_with_strand(read_strand: Strand, feature: &Feature, args: &Args) -> bool {
@@ -145,73 +93,25 @@ pub fn check_strand_with_strand(read_strand: Strand, feature: &Feature, args: &A
     is_strand_compatible(expected, feature.strand)
 }
 
-/// Check strand compatibility for paired-end using Strand enums directly.
+/// Paired-end strand check with precomputed expected strands.
 ///
-/// For parallel processing where we have strand enums but may lack first_in_pair info.
-/// When first_in_pair is not known, accepts if either read strand could match.
-#[inline]
-pub fn check_strand_paired_with_strands(
-    record_strand: Strand,
-    mate_strand: Strand,
-    feature: &Feature,
-    args: &Args,
-) -> bool {
-    check_strand_paired_with_strands_ex(record_strand, mate_strand, None, feature, args)
-}
-
-/// Extended paired-end strand check with optional first_in_pair flag.
+/// Both `expected_record` and `expected_mate` come from
+/// `apply_strand_mode(read_strand, mode)` evaluated once per fragment.
+/// Because `strand_from_reverse` only returns Forward or Reverse, the expected
+/// values are never `Strand::Unknown` in the stranded paths — so the only way
+/// to accept is feature unknown, or the feature strand matches either expected.
 ///
-/// When `first_in_pair` is provided, uses proper strand determination.
-/// Otherwise falls back to accepting if either read could match.
-#[inline]
-pub fn check_strand_paired_with_strands_ex(
-    record_strand: Strand,
-    mate_strand: Strand,
-    first_in_pair: Option<bool>,
-    feature: &Feature,
-    args: &Args,
+/// Caller must skip the call entirely in unstranded mode (the precomputed
+/// expecteds are meaningless there).
+#[inline(always)]
+pub fn check_strand_paired_precomputed(
+    expected_record: Strand,
+    expected_mate: Strand,
+    feature_strand: Strand,
 ) -> bool {
-    let mode = args.strand_mode();
-    if mode == StrandMode::Unstranded {
-        return true;
-    }
-
-    // If feature strand is unknown, always accept
-    if feature.strand == Strand::Unknown {
-        return true;
-    }
-
-    // If we know which read is first, use proper determination
-    if let Some(is_first) = first_in_pair {
-        let fragment_strand = match mode {
-            StrandMode::Stranded => {
-                if is_first {
-                    record_strand
-                } else {
-                    mate_strand
-                }
-            }
-            StrandMode::ReverselyStranded => {
-                // Second read determines strand (reversed)
-                let second_strand = if is_first { mate_strand } else { record_strand };
-                match second_strand {
-                    Strand::Forward => Strand::Reverse,
-                    Strand::Reverse => Strand::Forward,
-                    Strand::Unknown => Strand::Unknown,
-                }
-            }
-            StrandMode::Unstranded => unreachable!(),
-        };
-        return is_strand_compatible(fragment_strand, feature.strand);
-    }
-
-    // Without first_in_pair info, accept if either read's strand could match
-    // This is a conservative fallback that may over-accept
-    let expected_record = apply_strand_mode(record_strand, mode);
-    let expected_mate = apply_strand_mode(mate_strand, mode);
-
-    is_strand_compatible(expected_record, feature.strand)
-        || is_strand_compatible(expected_mate, feature.strand)
+    feature_strand == Strand::Unknown
+        || feature_strand == expected_record
+        || feature_strand == expected_mate
 }
 
 /// Check if overlap meets threshold requirements.

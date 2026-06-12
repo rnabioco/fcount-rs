@@ -14,6 +14,15 @@ pub const FRACTION_MULTIPLIER: i64 = 1_000_000;
 /// files at once, so we don't oversubscribe the scheduler.
 pub const SOFT_THREADS_PER_FILE_CAP: usize = 8;
 
+/// Cap on BGZF decompression threads per BAM file. BGZF decompression with
+/// libdeflate saturates well below the record-processing rate, so giving it
+/// every thread the user requested just adds OS-scheduler contention without
+/// improving throughput. At -t 8 with the old uncapped policy a single file
+/// spawned 1 producer + 8 BGZF + 8 record workers = 17 OS threads, which is
+/// >2× the user's stated budget. Capping BGZF here keeps the record-worker
+/// count as the dominant thread consumer.
+pub const BGZF_THREADS_CAP: usize = 4;
+
 /// Multiplier for channel buffer size relative to worker count.
 /// Buffer size = num_workers * CHANNEL_BUFFER_MULTIPLIER
 pub const CHANNEL_BUFFER_MULTIPLIER: usize = 4;
@@ -24,24 +33,19 @@ pub const MATE_TRACKER_SHARD_MULTIPLIER: usize = 8;
 
 /// Calculate how many parse/count worker threads to spawn per BAM file.
 ///
-/// With a single BAM, give the file the user's whole thread budget — capping
-/// at 4 (the previous behavior) leaves cores idle on bigger machines.
-/// With multiple BAMs, split the budget evenly (still ≥1) so we don't
-/// oversubscribe.
-#[inline]
-pub fn threads_per_file(total_threads: usize) -> usize {
-    threads_per_file_for(total_threads, 1)
-}
-
-/// Variant that knows how many BAM files we're about to process in parallel.
+/// With a single BAM, give the file the user's *whole* thread budget. Record
+/// processing — not BGZF decode — is the bottleneck (decode is separately
+/// capped at [`BGZF_THREADS_CAP`]), so on a many-core box a single large BAM
+/// should be allowed to scale past the soft cap. The soft cap only applies
+/// when several BAMs run concurrently, to avoid oversubscribing the scheduler.
 #[inline]
 pub fn threads_per_file_for(total_threads: usize, num_files: usize) -> usize {
     let total = total_threads.max(1);
     let files = num_files.max(1);
     if files <= 1 {
-        // Single file: use the whole budget, capped by the soft limit so we
-        // don't oversubscribe BGZF decode threads on very-many-core boxes.
-        total.min(SOFT_THREADS_PER_FILE_CAP).max(1)
+        // Single file: use the whole budget. No soft cap — more record workers
+        // directly improve throughput, and BGZF decode is capped elsewhere.
+        total
     } else {
         // Many files: split the budget across them, but always at least 1.
         (total / files).clamp(1, SOFT_THREADS_PER_FILE_CAP)

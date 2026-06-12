@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod alignment;
 pub mod annotation;
 pub mod cli;

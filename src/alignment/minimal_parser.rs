@@ -5,7 +5,9 @@
 //! used by featureCounts for maximum performance.
 
 use super::cigar::Interval;
+use rustc_hash::FxHasher;
 use smallvec::SmallVec;
+use std::hash::{Hash, Hasher};
 
 /// CIGAR operation types (from BAM specification)
 const CIGAR_M: u8 = 0; // Match or mismatch
@@ -19,16 +21,10 @@ const CIGAR_EQ: u8 = 7; // Sequence match
 const CIGAR_X: u8 = 8; // Sequence mismatch
 
 /// SAM flags
-pub const FLAG_PAIRED: u16 = 0x1;
-pub const FLAG_PROPER_PAIR: u16 = 0x2;
 pub const FLAG_UNMAPPED: u16 = 0x4;
 pub const FLAG_MATE_UNMAPPED: u16 = 0x8;
 pub const FLAG_REVERSE: u16 = 0x10;
-pub const FLAG_MATE_REVERSE: u16 = 0x20;
-pub const FLAG_FIRST: u16 = 0x40;
-pub const FLAG_SECOND: u16 = 0x80;
 pub const FLAG_SECONDARY: u16 = 0x100;
-pub const FLAG_FILTERED: u16 = 0x200;
 pub const FLAG_DUPLICATE: u16 = 0x400;
 pub const FLAG_SUPPLEMENTARY: u16 = 0x800;
 
@@ -47,14 +43,15 @@ pub struct MinimalRecord {
     pub intervals: SmallVec<[Interval; 8]>,
     /// NH tag value (number of alignments, 1 if not present)
     pub nh: u8,
-    /// Mate reference ID (for paired-end)
+    /// Mate reference ID (for paired-end chimeric check)
     pub mate_ref_id: i32,
-    /// Mate position (for paired-end)
-    pub mate_pos: i32,
-    /// Template length (for paired-end)
-    pub tlen: i32,
-    /// Read name bytes (for paired-end mate matching)
-    pub read_name: SmallVec<[u8; 64]>,
+    /// FxHash of the read name (for paired-end mate matching).
+    /// Set only when `need_read_name` is true during parse; 0 otherwise.
+    /// We hash directly from the BAM bytes to avoid copying the name into
+    /// a SmallVec just to hash it.
+    pub read_name_hash: u64,
+    // Note: mate_pos and tlen are present in the BAM header but never
+    // consumed by counting logic — we don't parse them.
 }
 
 impl MinimalRecord {
@@ -68,9 +65,7 @@ impl MinimalRecord {
             intervals: SmallVec::new(),
             nh: 1,
             mate_ref_id: -1,
-            mate_pos: 0,
-            tlen: 0,
-            read_name: SmallVec::new(),
+            read_name_hash: 0,
         }
     }
 
@@ -83,9 +78,7 @@ impl MinimalRecord {
         self.intervals.clear();
         self.nh = 1;
         self.mate_ref_id = -1;
-        self.mate_pos = 0;
-        self.tlen = 0;
-        self.read_name.clear();
+        self.read_name_hash = 0;
     }
 
     #[inline]
@@ -104,21 +97,6 @@ impl MinimalRecord {
     }
 
     #[inline]
-    pub fn is_mate_reverse(&self) -> bool {
-        self.flags & FLAG_MATE_REVERSE != 0
-    }
-
-    #[inline]
-    pub fn is_first_in_pair(&self) -> bool {
-        self.flags & FLAG_FIRST != 0
-    }
-
-    #[inline]
-    pub fn is_second_in_pair(&self) -> bool {
-        self.flags & FLAG_SECOND != 0
-    }
-
-    #[inline]
     pub fn is_secondary(&self) -> bool {
         self.flags & FLAG_SECONDARY != 0
     }
@@ -131,16 +109,6 @@ impl MinimalRecord {
     #[inline]
     pub fn is_supplementary(&self) -> bool {
         self.flags & FLAG_SUPPLEMENTARY != 0
-    }
-
-    #[inline]
-    pub fn is_paired(&self) -> bool {
-        self.flags & FLAG_PAIRED != 0
-    }
-
-    #[inline]
-    pub fn is_proper_pair(&self) -> bool {
-        self.flags & FLAG_PROPER_PAIR != 0
     }
 }
 
@@ -172,43 +140,41 @@ pub fn parse_bam_record(
         return Err("Record too short");
     }
 
-    // Parse fixed-size fields (BAM spec: all little-endian)
-    // Offsets within record data (after block_size):
-    // 0-3: refID (i32)
-    // 4-7: pos (i32)
-    // 8: l_read_name (u8)
-    // 9: mapq (u8)
-    // 10-11: bin (u16) - ignored
-    // 12-13: n_cigar_op (u16)
-    // 14-15: flag (u16)
-    // 16-19: l_seq (i32)
-    // 20-23: next_refID (i32)
-    // 24-27: next_pos (i32)
-    // 28-31: tlen (i32)
+    // Parse fixed-size fields (BAM spec: all little-endian). Offsets within
+    // record data (after block_size):
+    //   0-3 refID (i32)     | 4-7 pos (i32)     | 8 l_read_name (u8) | 9 mapq (u8)
+    //   10-11 bin (ignored) | 12-13 n_cigar_op (u16) | 14-15 flag (u16)
+    //   16-19 l_seq (i32)   | 20-23 next_refID (i32)
+    //   24-31 next_pos + tlen — intentionally skipped (see struct comment)
+    //
+    // Read the header as a single 32-byte chunk so the compiler sees one
+    // bounds check feeding all field extractions, instead of 10 indexed reads.
 
     record.clear();
 
-    record.ref_id = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    record.pos = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let l_read_name = data[8] as usize;
-    record.mapq = data[9];
-    let n_cigar_op = u16::from_le_bytes([data[12], data[13]]) as usize;
-    record.flags = u16::from_le_bytes([data[14], data[15]]);
-    let l_seq = i32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
-    record.mate_ref_id = i32::from_le_bytes([data[20], data[21], data[22], data[23]]);
-    record.mate_pos = i32::from_le_bytes([data[24], data[25], data[26], data[27]]);
-    record.tlen = i32::from_le_bytes([data[28], data[29], data[30], data[31]]);
+    let hdr: &[u8; 32] = data[..32].try_into().expect("data.len() ≥ 33 checked above");
+
+    record.ref_id = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
+    record.pos = i32::from_le_bytes(hdr[4..8].try_into().unwrap());
+    let l_read_name = hdr[8] as usize;
+    record.mapq = hdr[9];
+    let n_cigar_op = u16::from_le_bytes(hdr[12..14].try_into().unwrap()) as usize;
+    record.flags = u16::from_le_bytes(hdr[14..16].try_into().unwrap());
+    let l_seq = i32::from_le_bytes(hdr[16..20].try_into().unwrap()) as usize;
+    record.mate_ref_id = i32::from_le_bytes(hdr[20..24].try_into().unwrap());
 
     // Variable data starts at offset 32
     let var_start = 32;
 
-    // Parse read name if needed (for paired-end mate matching)
+    // Hash the read name directly from BAM bytes if needed (for paired-end
+    // mate matching). Avoids copying ~50-100 bytes per record into a SmallVec
+    // when all we ever do with the name is hash it.
     if need_read_name && l_read_name > 0 {
         let name_end = var_start + l_read_name - 1; // Exclude null terminator
         if name_end <= data.len() {
-            record
-                .read_name
-                .extend_from_slice(&data[var_start..name_end]);
+            let mut hasher = FxHasher::default();
+            data[var_start..name_end].hash(&mut hasher);
+            record.read_name_hash = hasher.finish();
         }
     }
 

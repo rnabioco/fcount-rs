@@ -6,13 +6,12 @@
 use anyhow::{Context, Result};
 use log::debug;
 use noodles_bgzf as bgzf;
-use noodles_sam as sam;
 use std::fs::File;
 use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
-use super::minimal_parser::{MinimalRecord, get_record_size, parse_bam_record};
+use super::minimal_parser::get_record_size;
 use crate::annotation::AnnotationIndex;
 
 /// Size of each batch of decompressed BAM data (target ~4MB per batch)
@@ -24,21 +23,13 @@ const BATCH_TARGET_SIZE: usize = 4 * 1024 * 1024;
 pub struct RecordBatch {
     /// Decompressed BAM record data (concatenated records)
     pub data: Vec<u8>,
-    /// Any leftover partial record from previous batch
-    pub leftover: Vec<u8>,
 }
 
 impl RecordBatch {
     pub fn new() -> Self {
         RecordBatch {
             data: Vec::with_capacity(BATCH_TARGET_SIZE + 65536),
-            leftover: Vec::new(),
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.data.clear();
-        self.leftover.clear();
     }
 }
 
@@ -52,8 +43,6 @@ impl Default for RecordBatch {
 pub struct BamBlockReader {
     /// Underlying BGZF reader (multi-threaded for parallel decompression)
     reader: bgzf::io::MultithreadedReader<File>,
-    /// BAM header
-    header: sam::Header,
     /// Pre-computed ref_id -> chrom_id mapping
     ref_to_chrom: Vec<Option<u16>>,
     /// Current read buffer
@@ -65,12 +54,6 @@ pub struct BamBlockReader {
 }
 
 impl BamBlockReader {
-    /// Open a BAM file and read the header
-    /// Uses multi-threaded BGZF decompression for better performance
-    pub fn open(path: &Path, annotation: &AnnotationIndex) -> Result<Self> {
-        Self::open_with_threads(path, annotation, 4) // Default to 4 decompression threads
-    }
-
     /// Open a BAM file with specified number of decompression threads
     pub fn open_with_threads(
         path: &Path,
@@ -102,10 +85,14 @@ impl BamBlockReader {
             .context("Failed to read header length")?;
         let header_len = u32::from_le_bytes(header_len_buf) as usize;
 
+        // Read past the header text to position the stream at the ref list.
+        // We don't parse it: counting only needs the ref_id → chrom_id mapping
+        // built below from the reference-sequence records.
         let mut header_text = vec![0u8; header_len];
         reader
             .read_exact(&mut header_text)
             .context("Failed to read header text")?;
+        drop(header_text);
 
         // Read reference sequences
         let mut n_ref_buf = [0u8; 4];
@@ -147,23 +134,13 @@ impl BamBlockReader {
             ref_to_chrom.len()
         );
 
-        // Parse header for noodles compatibility (not strictly needed but useful)
-        let header_str = String::from_utf8_lossy(&header_text);
-        let header = header_str.parse::<sam::Header>().unwrap_or_default();
-
         Ok(BamBlockReader {
             reader,
-            header,
             ref_to_chrom,
             read_buf: vec![0u8; 65536],
             leftover: Vec::new(),
             eof: false,
         })
-    }
-
-    /// Get the SAM header
-    pub fn header(&self) -> &sam::Header {
-        &self.header
     }
 
     /// Get the ref_id to chrom_id mapping
@@ -240,108 +217,5 @@ impl BamBlockReader {
         }
 
         Ok(Some(batch))
-    }
-
-    /// Parse all records from a batch
-    ///
-    /// This is called by worker threads
-    pub fn parse_batch_records<F>(
-        batch: &RecordBatch,
-        need_read_name: bool,
-        need_nh_tag: bool,
-        record: &mut MinimalRecord,
-        mut callback: F,
-    ) where
-        F: FnMut(&MinimalRecord),
-    {
-        let data = &batch.data;
-        let mut offset = 0;
-
-        while offset + 4 <= data.len() {
-            let record_size = get_record_size(&data[offset..]);
-            if record_size == 0 {
-                break;
-            }
-
-            let data_start = offset + 4;
-            let data_end = data_start + record_size;
-
-            if data_end > data.len() {
-                break;
-            }
-
-            // Parse this record
-            if parse_bam_record(
-                &data[data_start..data_end],
-                record,
-                need_read_name,
-                need_nh_tag,
-            )
-            .is_ok()
-            {
-                callback(record);
-            }
-
-            offset = data_end;
-        }
-    }
-}
-
-/// Iterator over records in a batch (alternative API)
-pub struct BatchRecordIter<'a> {
-    data: &'a [u8],
-    offset: usize,
-    record: MinimalRecord,
-    need_read_name: bool,
-    need_nh_tag: bool,
-}
-
-impl<'a> BatchRecordIter<'a> {
-    pub fn new(batch: &'a RecordBatch, need_read_name: bool, need_nh_tag: bool) -> Self {
-        BatchRecordIter {
-            data: &batch.data,
-            offset: 0,
-            record: MinimalRecord::new(),
-            need_read_name,
-            need_nh_tag,
-        }
-    }
-}
-
-impl<'a> Iterator for BatchRecordIter<'a> {
-    type Item = MinimalRecord;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.offset + 4 > self.data.len() {
-            return None;
-        }
-
-        let record_size = get_record_size(&self.data[self.offset..]);
-        if record_size == 0 {
-            return None;
-        }
-
-        let data_start = self.offset + 4;
-        let data_end = data_start + record_size;
-
-        if data_end > self.data.len() {
-            return None;
-        }
-
-        // Parse this record
-        if parse_bam_record(
-            &self.data[data_start..data_end],
-            &mut self.record,
-            self.need_read_name,
-            self.need_nh_tag,
-        )
-        .is_ok()
-        {
-            self.offset = data_end;
-            Some(self.record.clone())
-        } else {
-            self.offset = data_end;
-            self.next() // Skip invalid record
-        }
     }
 }

@@ -3,34 +3,6 @@ use super::overlap::{Assignment, FeatureHit};
 use super::stats::ReadCounters;
 use crate::cli::Args;
 
-/// Timing statistics for profiling hot paths
-#[derive(Debug, Default, Clone)]
-pub struct TimingStats {
-    /// Time spent parsing BAM records (nanoseconds)
-    pub parse_ns: u64,
-    /// Time spent hashing read names (nanoseconds)
-    pub hash_ns: u64,
-    /// Time spent in mate tracker lookups (nanoseconds)
-    pub mate_lookup_ns: u64,
-    /// Time spent querying interval trees (nanoseconds)
-    pub query_ns: u64,
-    /// Number of records parsed
-    pub records_parsed: u64,
-    /// Number of interval tree queries
-    pub queries_performed: u64,
-}
-
-impl TimingStats {
-    pub fn merge(&mut self, other: &TimingStats) {
-        self.parse_ns += other.parse_ns;
-        self.hash_ns += other.hash_ns;
-        self.mate_lookup_ns += other.mate_lookup_ns;
-        self.query_ns += other.query_ns;
-        self.records_parsed += other.records_parsed;
-        self.queries_performed += other.queries_performed;
-    }
-}
-
 /// Thread-local counter for accumulating counts
 #[derive(Debug)]
 pub struct ThreadCounter {
@@ -41,14 +13,10 @@ pub struct ThreadCounter {
     pub stats: ReadCounters,
     /// Buffer for collecting feature hits (reused to avoid allocation)
     pub hit_buffer: Vec<FeatureHit>,
-    /// Reusable set for tracking seen features during fragment deduplication
-    pub seen_features: rustc_hash::FxHashSet<u32>,
     /// Whether we're using fractional counting
     use_fractional: bool,
     /// Whether we're counting at feature level
     feature_level: bool,
-    /// Timing statistics for profiling
-    pub timing: TimingStats,
 }
 
 impl ThreadCounter {
@@ -57,10 +25,8 @@ impl ThreadCounter {
             counts: vec![0; size],
             stats: ReadCounters::default(),
             hit_buffer: Vec::with_capacity(8),
-            seen_features: rustc_hash::FxHashSet::default(),
             use_fractional: args.fractional_counting,
             feature_level: args.feature_level,
-            timing: TimingStats::default(),
         }
     }
 
@@ -119,23 +85,4 @@ impl ThreadCounter {
         }
     }
 
-    /// Convert fixed-point counts to floating point for output
-    pub fn get_float_counts(&self) -> Vec<f64> {
-        if self.use_fractional {
-            self.counts
-                .iter()
-                .map(|&c| c as f64 / FRACTION_MULTIPLIER as f64)
-                .collect()
-        } else {
-            self.counts.iter().map(|&c| c as f64).collect()
-        }
-    }
-
-    /// Merge another counter's results into this one
-    pub fn merge(&mut self, other: &ThreadCounter) {
-        for (i, &count) in other.counts.iter().enumerate() {
-            self.counts[i] += count;
-        }
-        self.stats.merge(&other.stats);
-    }
 }

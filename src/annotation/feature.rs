@@ -6,24 +6,6 @@ pub enum Strand {
     Unknown,
 }
 
-impl Strand {
-    pub fn from_char(c: char) -> Self {
-        match c {
-            '+' => Strand::Forward,
-            '-' => Strand::Reverse,
-            _ => Strand::Unknown,
-        }
-    }
-
-    pub fn from_option(opt: Option<&char>) -> Self {
-        match opt {
-            Some('+') => Strand::Forward,
-            Some('-') => Strand::Reverse,
-            _ => Strand::Unknown,
-        }
-    }
-}
-
 /// A genomic feature (exon, gene, etc.)
 ///
 /// Fields are ordered for optimal memory layout (16 bytes instead of 20):
@@ -47,30 +29,8 @@ pub struct Feature {
 impl Feature {
     /// Calculate the length of this feature in bases
     #[inline(always)]
+    #[allow(clippy::len_without_is_empty)] // genomic length, not a container
     pub fn len(&self) -> u32 {
         self.end - self.start + 1
-    }
-
-    /// Check if the feature is empty (invalid coordinates)
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.end < self.start
-    }
-
-    /// Check if this feature overlaps with a given interval
-    #[inline]
-    pub fn overlaps(&self, start: u32, end: u32) -> bool {
-        self.start <= end && self.end >= start
-    }
-
-    /// Calculate overlap length with a given interval
-    #[inline]
-    pub fn overlap_len(&self, start: u32, end: u32) -> u32 {
-        if !self.overlaps(start, end) {
-            return 0;
-        }
-        let overlap_start = self.start.max(start);
-        let overlap_end = self.end.min(end);
-        overlap_end - overlap_start + 1
     }
 }

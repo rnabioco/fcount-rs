@@ -1,7 +1,9 @@
 [package]
 name = "fcount-rs"
-version = "0.1.0-alpha.3"
+version = "0.1.1"
 edition = "2024"
+# MSRV: edition 2024 + stable let-chains (used in the CIGAR/chimeric paths).
+rust-version = "1.88"
 authors = ["Jay Hesselberth <jay.hesselberth@gmail.com>"]
 description = "Ultrafast feature counting for RNA-seq data"
 license = "MIT"
@@ -14,11 +16,11 @@ name = "fcount"
 path = "src/main.rs"
 
 [dependencies]
-# BAM/SAM parsing (pure Rust)
+# BAM/SAM parsing (pure Rust). noodles-bam/sam are used only for paired-end
+# auto-detection in main; the hot path uses the custom block reader + parser.
 noodles-bam = "0.87"
 noodles-sam = "0.83"
 noodles-bgzf = { version = "0.46", features = ["libdeflate"] }
-noodles-core = "0.19"
 
 # Parallelism
 rayon = "1.10"
@@ -32,13 +34,11 @@ rustc-hash = "2.0"
 smallvec = "1.13"
 
 # Error handling
-thiserror = "2.0"
 anyhow = "1.0"
 
 # Logging
 log = "0.4"
 env_logger = "0.11"
-parking_lot = "0.12.5"
 coitrees = "0.4.0"
 memchr = "2.7.6"
 indicatif = { version = "0.18.3", features = ["rayon"] }
@@ -48,14 +48,31 @@ dashmap = "6.1.0"
 [dev-dependencies]
 tempfile = "3"
 
+# Fast dev builds, but with optimized third-party crates so tests and
+# debug-mode counting runs proceed at a reasonable speed.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Optimized release build: LTO + single codegen unit for maximum performance.
 [profile.release]
-lto = true
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 panic = "abort"
+strip = true
+
+# `cargo bench` uses [profile.bench], which by default does NOT inherit from
+# [profile.release]. Pin it here so microbenchmarks measure the same codegen
+# (LTO, single codegen unit) that ships in the release binary. `strip` is
+# disabled so profilers/criterion keep symbols.
+[profile.bench]
+inherits = "release"
+strip = false
 
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+strip = false
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6.1"

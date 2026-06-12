@@ -1,15 +1,13 @@
 mod constants;
 mod counter;
-pub mod filtering;
 pub mod overlap;
 mod sharded_mate_tracker;
 mod stats;
-mod worker;
 
 pub use constants::{
-    FRACTION_MULTIPLIER, channel_buffer_size, mate_tracker_shards, threads_per_file_for,
+    BGZF_THREADS_CAP, FRACTION_MULTIPLIER, channel_buffer_size, mate_tracker_shards,
+    threads_per_file_for,
 };
-pub use filtering::Filterable;
 
 pub use counter::ThreadCounter;
 pub use sharded_mate_tracker::{DeferredRead, ShardedMateTracker};
@@ -18,16 +16,13 @@ pub use stats::ReadCounters;
 use anyhow::Result;
 use crossbeam::channel;
 use indicatif::{ProgressBar, ProgressStyle};
-use log::{debug, info};
+use log::debug;
 use rayon::prelude::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::alignment::block_reader::BamBlockReader;
-use crate::alignment::{AlignmentReader, AlignmentRecord, MateTracker, PendingMate};
 use crate::annotation::AnnotationIndex;
 use crate::cli::Args;
-use worker::Worker;
 
 /// Result of counting reads across all BAM files
 pub struct CountResult {
@@ -48,463 +43,6 @@ impl CountResult {
     }
 }
 
-/// Count reads in all BAM files
-pub fn count_reads(args: &Args, annotation: &AnnotationIndex) -> Result<CountResult> {
-    // Initialize thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads)
-        .build_global()
-        .ok(); // Ignore if already initialized
-
-    let num_features = annotation.features.len();
-    let num_genes = annotation.gene_names.len();
-    let count_size = if args.feature_level {
-        num_features
-    } else {
-        num_genes
-    };
-
-    // Process each BAM file and collect results
-    let progress = AtomicUsize::new(0);
-
-    let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
-        .bam_files
-        .par_iter()
-        .map(|bam_input| {
-            let result = process_bam_file(&bam_input.path, args, annotation, count_size);
-
-            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            info!(
-                "Processed {}/{} BAM files: {}",
-                done,
-                args.bam_files.len(),
-                bam_input.display_name()
-            );
-
-            result
-        })
-        .collect();
-
-    // Collect per-sample results (don't merge)
-    let mut counts_per_sample = Vec::with_capacity(args.bam_files.len());
-    let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
-
-    for result in results {
-        let (counts, stats) = result?;
-        counts_per_sample.push(counts);
-        stats_per_sample.push(stats);
-    }
-
-    let mut aggregated = ReadCounters::default();
-    for s in &stats_per_sample {
-        aggregated.merge(s);
-    }
-
-    debug!(
-        "Total: {} assigned, {} unassigned",
-        aggregated.assigned,
-        aggregated.total_unassigned()
-    );
-
-    Ok(CountResult {
-        counts_per_sample,
-        stats_per_sample,
-    })
-}
-
-fn process_bam_file(
-    bam_path: &std::path::Path,
-    args: &Args,
-    annotation: &AnnotationIndex,
-    count_size: usize,
-) -> Result<(Vec<i64>, ReadCounters)> {
-    // Use open_with_annotation for pre-computed ref_id → chrom_id mapping
-    let mut reader = AlignmentReader::open_with_annotation(bam_path, args.threads, annotation)?;
-    let mut counter = ThreadCounter::new(count_size, args);
-    let mut mate_tracker = if args.paired_end {
-        Some(MateTracker::new(100_000))
-    } else {
-        None
-    };
-
-    let mut record = AlignmentRecord {
-        read_name: Vec::new(),
-        flags: 0,
-        chrom_id: None,
-        start: 0,
-        mapq: 0,
-        intervals: smallvec::SmallVec::new(),
-        nh: 1,
-        mate_chrom_id: None,
-        mate_start: 0,
-        template_len: 0,
-    };
-
-    let mut records = reader.records();
-
-    while records.read_record(annotation, &mut record)? {
-        // Skip unmapped reads
-        if record.is_unmapped() {
-            counter.stats.unassigned_unmapped += 1;
-            continue;
-        }
-
-        // Skip secondary/supplementary if primary-only mode
-        if args.primary_only && (record.is_secondary() || record.is_supplementary()) {
-            counter.stats.unassigned_secondary += 1;
-            continue;
-        }
-
-        // Skip low quality
-        if record.mapq < args.min_mapping_quality {
-            counter.stats.unassigned_mapping_quality += 1;
-            continue;
-        }
-
-        // Skip duplicates if requested
-        if args.ignore_duplicates && record.is_duplicate() {
-            counter.stats.unassigned_duplicate += 1;
-            continue;
-        }
-
-        // Skip multi-mappers if not counting them
-        if !args.count_multi_mapping && record.nh > 1 {
-            counter.stats.unassigned_multimapping += 1;
-            continue;
-        }
-
-        // Handle paired-end vs single-end
-        if args.paired_end && record.is_paired() {
-            process_paired_read(&record, &mut counter, args, annotation, &mut mate_tracker);
-        } else {
-            process_single_read(&record, &mut counter, args, annotation);
-        }
-    }
-
-    // Handle orphan mates (reads whose mate was never found)
-    if let Some(mut tracker) = mate_tracker {
-        let orphan_count = tracker.pending_count();
-        if orphan_count > 0 {
-            log::debug!("{} orphan mates remaining after processing", orphan_count);
-            // Process orphans as single-end reads
-            for mate in tracker.drain() {
-                process_orphan_mate(&mate, &mut counter, args, annotation);
-            }
-        }
-    }
-
-    Ok((counter.counts, counter.stats))
-}
-
-fn process_single_read(
-    record: &AlignmentRecord,
-    counter: &mut ThreadCounter,
-    args: &Args,
-    annotation: &AnnotationIndex,
-) {
-    use crate::cli::StrandMode;
-
-    let chrom_id = match record.chrom_id {
-        Some(id) => id,
-        None => {
-            counter.stats.unassigned_no_features += 1;
-            return;
-        }
-    };
-
-    // Precompute read_len once (only needed if min_overlap_fraction > 0)
-    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
-        record.intervals.iter().map(|i| i.len()).sum()
-    } else {
-        0
-    };
-
-    // Precompute expected strand once
-    let expected_strand = match args.strand_mode() {
-        StrandMode::Unstranded => None,
-        mode => Some(overlap::apply_strand_mode(
-            overlap::strand_from_reverse(record.is_reverse_strand()),
-            mode,
-        )),
-    };
-
-    // Find overlapping features using callback-based query (no allocation)
-    counter.hit_buffer.clear();
-    for interval in &record.intervals {
-        annotation.query_overlapping(
-            chrom_id,
-            interval.start,
-            interval.end,
-            |feat_idx, feature| {
-                // Check strand if stranded mode
-                if !overlap::check_strand_fast(expected_strand, feature.strand) {
-                    return;
-                }
-
-                // Calculate overlap if needed
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-                } else {
-                    1
-                };
-
-                // Check minimum overlap
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
-
-                counter.hit_buffer.push(overlap::FeatureHit {
-                    feature_idx: feat_idx,
-                    gene_id: feature.gene_id,
-                    overlap_len,
-                });
-            },
-        );
-    }
-
-    // Assign read
-    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
-    counter.apply_assignment(assignment, record.nh, args);
-}
-
-fn process_paired_read(
-    record: &AlignmentRecord,
-    counter: &mut ThreadCounter,
-    args: &Args,
-    annotation: &AnnotationIndex,
-    mate_tracker: &mut Option<MateTracker>,
-) {
-    let tracker = match mate_tracker {
-        Some(t) => t,
-        None => return,
-    };
-
-    // Check if mate is mapped
-    if record.is_mate_unmapped() {
-        if args.require_both_aligned {
-            counter.stats.unassigned_singleton += 1;
-            return;
-        }
-        // Process as single-end
-        process_single_read(record, counter, args, annotation);
-        return;
-    }
-
-    let chrom_id = match record.chrom_id {
-        Some(id) => id,
-        None => {
-            counter.stats.unassigned_no_features += 1;
-            return;
-        }
-    };
-
-    // Check for chimeric reads (mates on different chromosomes)
-    if record.mate_chrom_id != record.chrom_id && args.no_chimeric {
-        counter.stats.unassigned_chimeric += 1;
-        return;
-    }
-
-    // Try to find mate
-    let mate = tracker.add_mate(
-        &record.read_name,
-        chrom_id,
-        record.start,
-        record.intervals.clone(),
-        record.flags,
-        record.mapq,
-        record.nh,
-    );
-
-    if let Some(mate) = mate {
-        // We have both mates - process as fragment
-        process_fragment(record, &mate, counter, args, annotation);
-    }
-    // Otherwise, mate is now stored and we wait for the other end
-}
-
-fn process_fragment(
-    record: &AlignmentRecord,
-    mate: &PendingMate,
-    counter: &mut ThreadCounter,
-    args: &Args,
-    annotation: &AnnotationIndex,
-) {
-    use crate::cli::StrandMode;
-
-    let chrom_id = match record.chrom_id {
-        Some(id) => id,
-        None => {
-            counter.stats.unassigned_no_features += 1;
-            return;
-        }
-    };
-
-    // Precompute read_len once (only needed if min_overlap_fraction > 0)
-    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
-        record.intervals.iter().map(|i| i.len()).sum()
-    } else {
-        0
-    };
-
-    // Check if unstranded mode (skip strand checks entirely)
-    let is_unstranded = args.strand_mode() == StrandMode::Unstranded;
-
-    // Collect hits from both mates using callback-based query (no allocation)
-    counter.hit_buffer.clear();
-
-    // Hits from current record
-    for interval in &record.intervals {
-        annotation.query_overlapping(
-            chrom_id,
-            interval.start,
-            interval.end,
-            |feat_idx, feature| {
-                if !is_unstranded && !overlap::check_strand_paired(record, mate, feature, args) {
-                    return;
-                }
-
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-                        + crate::alignment::total_overlap(
-                            &mate.intervals,
-                            feature.start,
-                            feature.end,
-                        )
-                } else {
-                    1
-                };
-
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
-
-                counter.hit_buffer.push(overlap::FeatureHit {
-                    feature_idx: feat_idx,
-                    gene_id: feature.gene_id,
-                    overlap_len,
-                });
-            },
-        );
-    }
-
-    // Hits from mate (if on same chromosome)
-    if mate.chrom_id == chrom_id {
-        // Build set of already-seen features for O(1) duplicate check (reusing allocated set)
-        counter.seen_features.clear();
-        counter
-            .seen_features
-            .extend(counter.hit_buffer.iter().map(|h| h.feature_idx));
-
-        for interval in &mate.intervals {
-            annotation.query_overlapping(
-                chrom_id,
-                interval.start,
-                interval.end,
-                |feat_idx, feature| {
-                    // Skip if already counted - O(1) lookup
-                    if counter.seen_features.contains(&feat_idx) {
-                        return;
-                    }
-
-                    if !is_unstranded && !overlap::check_strand_paired(record, mate, feature, args)
-                    {
-                        return;
-                    }
-
-                    let overlap_len = if args.need_overlap_length() {
-                        crate::alignment::total_overlap(
-                            &record.intervals,
-                            feature.start,
-                            feature.end,
-                        ) + crate::alignment::total_overlap(
-                            &mate.intervals,
-                            feature.start,
-                            feature.end,
-                        )
-                    } else {
-                        1
-                    };
-
-                    if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                        return;
-                    }
-
-                    counter.hit_buffer.push(overlap::FeatureHit {
-                        feature_idx: feat_idx,
-                        gene_id: feature.gene_id,
-                        overlap_len,
-                    });
-                },
-            );
-        }
-    }
-
-    // Assign fragment
-    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
-    counter.apply_assignment(assignment, record.nh.max(mate.nh), args);
-}
-
-/// Process an orphan mate (read whose mate was never found) as single-end
-fn process_orphan_mate(
-    mate: &PendingMate,
-    counter: &mut ThreadCounter,
-    args: &Args,
-    annotation: &AnnotationIndex,
-) {
-    use crate::cli::StrandMode;
-
-    // Precompute read_len once (only needed if min_overlap_fraction > 0)
-    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
-        mate.intervals.iter().map(|i| i.len()).sum()
-    } else {
-        0
-    };
-
-    // Precompute expected strand once
-    let expected_strand = match args.strand_mode() {
-        StrandMode::Unstranded => None,
-        mode => Some(overlap::apply_strand_mode(
-            overlap::strand_from_reverse(mate.is_reverse_strand()),
-            mode,
-        )),
-    };
-
-    counter.hit_buffer.clear();
-
-    for interval in &mate.intervals {
-        annotation.query_overlapping(
-            mate.chrom_id,
-            interval.start,
-            interval.end,
-            |feat_idx, feature| {
-                // Check strand
-                if !overlap::check_strand_fast(expected_strand, feature.strand) {
-                    return;
-                }
-
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&mate.intervals, feature.start, feature.end)
-                } else {
-                    1
-                };
-
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
-
-                counter.hit_buffer.push(overlap::FeatureHit {
-                    feature_idx: feat_idx,
-                    gene_id: feature.gene_id,
-                    overlap_len,
-                });
-            },
-        );
-    }
-
-    let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
-    counter.apply_assignment(assignment, mate.nh, args);
-}
-
 /// Process a single BAM file using parallel producer-consumer pattern
 /// Uses crossbeam scoped threads for safe borrowing
 fn process_bam_parallel(
@@ -515,13 +53,16 @@ fn process_bam_parallel(
     threads_per_file: usize,
 ) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
+    use crate::alignment::minimal_parser::MinimalRecord;
 
-    // Open BAM reader with specified threads for decompression
-    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, threads_per_file)?;
+    // BGZF decompression saturates well below record-processing rate; cap
+    // separately from record workers so -t N doesn't 2× oversubscribe the OS
+    // scheduler (see BGZF_THREADS_CAP doc).
+    let bgzf_threads = threads_per_file.clamp(1, BGZF_THREADS_CAP);
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, bgzf_threads)?;
 
-    // Pre-create Arc before spawning workers (avoids N clones of underlying data)
-    let ref_to_chrom_arc = Arc::new(reader.ref_to_chrom().to_vec());
-    let args_arc = Arc::new(args.clone());
+    // Share the ref_id→chrom_id table across workers (small Vec, no reason to clone).
+    let ref_to_chrom: Arc<[Option<u16>]> = Arc::from(reader.ref_to_chrom().to_vec());
 
     // Number of worker threads
     let num_workers = threads_per_file.max(1);
@@ -532,23 +73,32 @@ fn process_bam_parallel(
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
         // Spawn workers — all share the borrowed annotation index. Cloning it
-        // per thread (the previous comment claimed "cache locality") actually
-        // duplicates the COITree N times and pushes the working set out of L3.
+        // per thread duplicates the COITree N times and pushes the working set
+        // out of L3, which measured slower for single-end. Each worker
+        // accumulates into its own ThreadCounter and routes every record
+        // through the shared process_minimal_single_read path.
         let worker_handles: Vec<_> = (0..num_workers)
             .map(|_| {
                 let rx = rx.clone();
-                let ref_to_chrom_arc = Arc::clone(&ref_to_chrom_arc);
-                let args_arc = Arc::clone(&args_arc);
+                let ref_to_chrom = Arc::clone(&ref_to_chrom);
 
                 scope.spawn(move |_| {
-                    let mut worker = Worker::new(count_size, ref_to_chrom_arc, args_arc);
+                    let mut counter = ThreadCounter::new(count_size, args);
+                    let mut record = MinimalRecord::default();
 
                     // Process batches until channel closes
                     while let Ok(batch) = rx.recv() {
-                        worker.process_batch(&batch, annotation);
+                        process_single_batch(
+                            &batch,
+                            &mut record,
+                            &mut counter,
+                            &ref_to_chrom,
+                            annotation,
+                            args,
+                        );
                     }
 
-                    worker.into_results()
+                    (counter.counts, counter.stats)
                 })
             })
             .collect();
@@ -584,6 +134,111 @@ fn process_bam_parallel(
     });
 
     result.map_err(|_| anyhow::anyhow!("Scoped thread panicked"))
+}
+
+/// Process a batch of records in single-end mode.
+///
+/// Mirrors the filtering preamble of `process_paired_batch`, but every
+/// surviving record is counted directly as single-end — there is no mate
+/// tracking. Shares `process_minimal_single_read` so the overlap/resolve/count
+/// logic is identical across all code paths.
+fn process_single_batch(
+    batch: &crate::alignment::block_reader::RecordBatch,
+    record: &mut crate::alignment::minimal_parser::MinimalRecord,
+    counter: &mut ThreadCounter,
+    ref_to_chrom: &[Option<u16>],
+    annotation: &AnnotationIndex,
+    args: &Args,
+) {
+    use crate::alignment::minimal_parser::get_record_size;
+
+    // Hoist per-record args field reads out of the inner loop.
+    let count_multi_mapping = args.count_multi_mapping;
+    let primary_only = args.primary_only;
+    let min_mapping_quality = args.min_mapping_quality;
+    let ignore_duplicates = args.ignore_duplicates;
+    // We need the NH tag whenever NH affects the result: to *exclude* NH>1 reads
+    // when not counting multi-mappers, or to weight them when fractional. (Only
+    // when counting multi-mappers non-fractionally is NH irrelevant.)
+    let need_nh = !count_multi_mapping || args.fractional_counting;
+
+    let mut offset = 0;
+    let data = &batch.data;
+
+    while offset + 4 <= data.len() {
+        let record_size = get_record_size(&data[offset..]);
+        if record_size == 0 {
+            break;
+        }
+
+        let data_start = offset + 4;
+        let data_end = data_start + record_size;
+
+        if data_end > data.len() {
+            break;
+        }
+
+        // Single-end never needs the read name.
+        if crate::alignment::minimal_parser::parse_bam_record(
+            &data[data_start..data_end],
+            record,
+            false,
+            need_nh,
+        )
+        .is_err()
+        {
+            offset = data_end;
+            continue;
+        }
+
+        offset = data_end;
+
+        // Skip unmapped reads
+        if record.is_unmapped() {
+            counter.stats.unassigned_unmapped += 1;
+            continue;
+        }
+
+        // Skip secondary/supplementary if primary-only mode
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
+            counter.stats.unassigned_secondary += 1;
+            continue;
+        }
+
+        // Skip low quality
+        if record.mapq < min_mapping_quality {
+            counter.stats.unassigned_mapping_quality += 1;
+            continue;
+        }
+
+        // Skip duplicates if requested
+        if ignore_duplicates && record.is_duplicate() {
+            counter.stats.unassigned_duplicate += 1;
+            continue;
+        }
+
+        // Skip multi-mappers if not counting them
+        if !count_multi_mapping && record.nh > 1 {
+            counter.stats.unassigned_multimapping += 1;
+            continue;
+        }
+
+        // Map ref_id → chrom_id
+        let chrom_id = if record.ref_id >= 0 && (record.ref_id as usize) < ref_to_chrom.len() {
+            ref_to_chrom[record.ref_id as usize]
+        } else {
+            None
+        };
+        let chrom_id = match chrom_id {
+            Some(id) => id,
+            None => {
+                counter.stats.unassigned_no_features += 1;
+                continue;
+            }
+        };
+
+        process_minimal_single_read(record, chrom_id, counter, args, annotation);
+    }
 }
 
 /// Count reads using parallel processing (for single-end mode only for now)
@@ -657,13 +312,17 @@ fn process_bam_parallel_paired(
     annotation: &AnnotationIndex,
     count_size: usize,
     threads_per_file: usize,
-) -> Result<(Vec<i64>, ReadCounters, counter::TimingStats)> {
+) -> Result<(Vec<i64>, ReadCounters)> {
     use crate::alignment::block_reader::RecordBatch;
     use crate::alignment::minimal_parser::MinimalRecord;
 
-    // Open BAM reader with specified threads for decompression
-    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, threads_per_file)?;
-    let ref_to_chrom: Vec<Option<u16>> = reader.ref_to_chrom().to_vec();
+    // BGZF decompression saturates well below record-processing rate; cap
+    // separately from record workers so -t N doesn't 2× oversubscribe the OS
+    // scheduler (see BGZF_THREADS_CAP doc).
+    let bgzf_threads = threads_per_file.clamp(1, BGZF_THREADS_CAP);
+    let mut reader = BamBlockReader::open_with_threads(bam_path, annotation, bgzf_threads)?;
+    // Share the ref_id→chrom_id table across workers (small Vec, no reason to clone).
+    let ref_to_chrom: Arc<[Option<u16>]> = Arc::from(reader.ref_to_chrom().to_vec());
 
     // All threads are workers
     let num_workers = threads_per_file.max(1);
@@ -676,13 +335,18 @@ fn process_bam_parallel_paired(
 
     // Use crossbeam scoped threads for safe borrowing
     let result = crossbeam::scope(|scope| {
-        // Spawn workers - each gets its own clone of annotation for cache locality
+        // Spawn workers — each clones AnnotationIndex (COITrees + features) for
+        // thread-local cache locality. Measured: sharing the index via &annotation
+        // *regressed* paired-end throughput by ~5–9% at 4/8 threads on chr22,
+        // because the random tree traversal across mate pairs benefits more from
+        // thread-local L1/L2 residency than the clone cost hurts. (Single-end is
+        // different — see process_bam_parallel for the shared-index variant.)
         let worker_handles: Vec<_> = (0..num_workers)
             .map(|_| {
                 let rx = rx.clone();
-                let ref_to_chrom = ref_to_chrom.clone();
+                let ref_to_chrom = Arc::clone(&ref_to_chrom);
                 let mate_tracker = Arc::clone(&mate_tracker);
-                let local_annotation = annotation.clone(); // Per-thread copy for cache locality
+                let local_annotation = annotation.clone();
 
                 scope.spawn(move |_| {
                     let mut counter = ThreadCounter::new(count_size, args);
@@ -701,7 +365,7 @@ fn process_bam_parallel_paired(
                         );
                     }
 
-                    (counter.counts, counter.stats, counter.timing)
+                    (counter.counts, counter.stats)
                 })
             })
             .collect();
@@ -724,15 +388,13 @@ fn process_bam_parallel_paired(
         // Collect and merge results
         let mut final_counts = vec![0i64; count_size];
         let mut final_stats = ReadCounters::default();
-        let mut final_timing = counter::TimingStats::default();
 
         for handle in worker_handles {
-            let (counts, stats, timing) = handle.join().expect("Worker thread panicked");
+            let (counts, stats) = handle.join().expect("Worker thread panicked");
             for (i, &count) in counts.iter().enumerate() {
                 final_counts[i] += count;
             }
             final_stats.merge(&stats);
-            final_timing.merge(&timing);
         }
 
         // Handle orphan mates (reads whose mate was never found)
@@ -758,7 +420,7 @@ fn process_bam_parallel_paired(
             }
         }
 
-        (final_counts, final_stats, final_timing)
+        (final_counts, final_stats)
     });
 
     result.map_err(|_| anyhow::anyhow!("Scoped thread panicked"))
@@ -775,6 +437,22 @@ fn process_paired_batch(
     mate_tracker: &ShardedMateTracker,
 ) {
     use crate::alignment::minimal_parser::get_record_size;
+
+    // Hoist per-record args field reads out of the inner loop. The Args struct
+    // is &-borrowed so LTO can probably do this on its own, but making the
+    // hoist explicit shortens the prologue of each iteration and removes any
+    // possibility the optimizer leaves a redundant load behind.
+    let count_multi_mapping = args.count_multi_mapping;
+    let primary_only = args.primary_only;
+    let min_mapping_quality = args.min_mapping_quality;
+    let ignore_duplicates = args.ignore_duplicates;
+    let require_both_aligned = args.require_both_aligned;
+    let no_chimeric = args.no_chimeric;
+    // We need the NH tag whenever NH affects the result: to *exclude* NH>1 reads
+    // when not counting multi-mappers, or to weight them when fractional. Parsing
+    // it only under count_multi_mapping (the old behavior) silently left every
+    // multi-mapper at nh=1, so the `nh > 1` filter never fired.
+    let need_nh = !count_multi_mapping || args.fractional_counting;
 
     let mut offset = 0;
     let data = &batch.data;
@@ -797,8 +475,8 @@ fn process_paired_batch(
         if crate::alignment::minimal_parser::parse_bam_record(
             &data[data_start..data_end],
             record,
-            true,                     // need_read_name for paired-end
-            args.count_multi_mapping, // Only parse NH if counting multi-mappers
+            true, // need_read_name for paired-end
+            need_nh,
         )
         .is_err()
         {
@@ -815,25 +493,25 @@ fn process_paired_batch(
         }
 
         // Skip secondary/supplementary if primary-only mode
-        if args.primary_only && (record.is_secondary() || record.is_supplementary()) {
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
             counter.stats.unassigned_secondary += 1;
             continue;
         }
 
         // Skip low quality
-        if record.mapq < args.min_mapping_quality {
+        if record.mapq < min_mapping_quality {
             counter.stats.unassigned_mapping_quality += 1;
             continue;
         }
 
         // Skip duplicates if requested
-        if args.ignore_duplicates && record.is_duplicate() {
+        if ignore_duplicates && record.is_duplicate() {
             counter.stats.unassigned_duplicate += 1;
             continue;
         }
 
         // Skip multi-mappers if not counting them
-        if !args.count_multi_mapping && record.nh > 1 {
+        if !count_multi_mapping && record.nh > 1 {
             counter.stats.unassigned_multimapping += 1;
             continue;
         }
@@ -855,7 +533,7 @@ fn process_paired_batch(
 
         // Check if mate is mapped
         if record.is_mate_unmapped() {
-            if args.require_both_aligned {
+            if require_both_aligned {
                 counter.stats.unassigned_singleton += 1;
                 continue;
             }
@@ -864,42 +542,42 @@ fn process_paired_batch(
             continue;
         }
 
-        // Check for chimeric reads (mates on different chromosomes)
-        let mate_chrom_id =
-            if record.mate_ref_id >= 0 && (record.mate_ref_id as usize) < ref_to_chrom.len() {
+        // Check for chimeric reads (mates on different chromosomes).
+        // Only resolve the mate chrom when the chimeric filter is actually on;
+        // otherwise the lookup is pure waste.
+        if no_chimeric {
+            let mate_chrom_id = if record.mate_ref_id >= 0
+                && (record.mate_ref_id as usize) < ref_to_chrom.len()
+            {
                 ref_to_chrom[record.mate_ref_id as usize]
             } else {
                 None
             };
 
-        // Only mark as chimeric if both chromosomes are in annotation AND different
-        // If mate_chrom_id is None, mate is on chromosome not in annotation - not chimeric
-        if let Some(mate_chrom) = mate_chrom_id
-            && mate_chrom != chrom_id
-            && args.no_chimeric
-        {
-            counter.stats.unassigned_chimeric += 1;
-            continue;
+            // Only mark as chimeric if both chromosomes are in annotation AND
+            // different. If mate_chrom_id is None, mate is on a chromosome not
+            // in annotation — not chimeric.
+            if let Some(mate_chrom) = mate_chrom_id
+                && mate_chrom != chrom_id
+            {
+                counter.stats.unassigned_chimeric += 1;
+                continue;
+            }
         }
 
-        // Hash the read name and check for existing mate first
-        let name_hash = ShardedMateTracker::hash_name(&record.read_name);
-
-        // Try to get existing mate (avoids cloning intervals if mate exists)
-        if let Some(mate) = mate_tracker.remove_mate(name_hash) {
-            // Found mate - process as fragment (no clone needed)
+        // Hash was precomputed inline by the parser to avoid copying the name.
+        // take_or_insert_with holds the shard lock once and only constructs
+        // the DeferredRead (cloning the intervals SmallVec) when this is the
+        // first mate of the pair.
+        let name_hash = record.read_name_hash;
+        let mate = mate_tracker.take_or_insert_with(name_hash, || DeferredRead {
+            chrom_id,
+            intervals: record.intervals.clone(),
+            flags: record.flags,
+            nh: record.nh,
+        });
+        if let Some(mate) = mate {
             process_minimal_fragment(record, chrom_id, &mate, counter, args, annotation);
-        } else {
-            // No mate yet - create deferred read and store it
-            let deferred = DeferredRead {
-                chrom_id,
-                start: record.pos as u32,
-                intervals: record.intervals.clone(),
-                flags: record.flags,
-                mapq: record.mapq,
-                nh: record.nh,
-            };
-            mate_tracker.insert(name_hash, deferred);
         }
     }
 }
@@ -930,6 +608,9 @@ fn process_minimal_single_read(
         )),
     };
 
+    // Hoist out of the per-feature callback — answer is constant per read.
+    let needs_overlap = args.need_overlap_length();
+
     counter.hit_buffer.clear();
 
     for interval in &record.intervals {
@@ -943,15 +624,22 @@ fn process_minimal_single_read(
                     return;
                 }
 
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
+                // When needs_overlap is false, every overlap threshold knob is
+                // at its no-op default, so the threshold check trivially passes
+                // with overlap_len=1 — skip the call entirely.
+                let overlap_len = if needs_overlap {
+                    let ol = crate::alignment::total_overlap(
+                        &record.intervals,
+                        feature.start,
+                        feature.end,
+                    );
+                    if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                        return;
+                    }
+                    ol
                 } else {
                     1
                 };
-
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
 
                 counter.hit_buffer.push(overlap::FeatureHit {
                     feature_idx: feat_idx,
@@ -985,21 +673,27 @@ fn process_minimal_fragment(
     };
 
     // Check if unstranded mode (skip strand checks entirely)
-    let is_unstranded = args.strand_mode() == StrandMode::Unstranded;
+    let mode = args.strand_mode();
+    let is_unstranded = mode == StrandMode::Unstranded;
 
     counter.hit_buffer.clear();
 
-    let record_strand = if record.is_reverse() {
-        crate::annotation::Strand::Reverse
+    // Precompute the expected feature strand for the record and the mate.
+    // In unstranded mode these are unused, so set them to Unknown — the
+    // callback gates the precomputed check on `!is_unstranded` anyway.
+    let (expected_record, expected_mate) = if is_unstranded {
+        (crate::annotation::Strand::Unknown, crate::annotation::Strand::Unknown)
     } else {
-        crate::annotation::Strand::Forward
+        let record_strand = overlap::strand_from_reverse(record.is_reverse());
+        let mate_strand = overlap::strand_from_reverse(mate.is_reverse_strand());
+        (
+            overlap::apply_strand_mode(record_strand, mode),
+            overlap::apply_strand_mode(mate_strand, mode),
+        )
     };
 
-    let mate_strand = if mate.is_reverse_strand() {
-        crate::annotation::Strand::Reverse
-    } else {
-        crate::annotation::Strand::Forward
-    };
+    // Hoist out of the per-feature callback — answer is constant per fragment.
+    let needs_overlap = args.need_overlap_length();
 
     // Hits from current record - use callback-based query
     for interval in &record.intervals {
@@ -1009,30 +703,32 @@ fn process_minimal_fragment(
             interval.end,
             |feat_idx, feature| {
                 if !is_unstranded
-                    && !overlap::check_strand_paired_with_strands(
-                        record_strand,
-                        mate_strand,
-                        feature,
-                        args,
+                    && !overlap::check_strand_paired_precomputed(
+                        expected_record,
+                        expected_mate,
+                        feature.strand,
                     )
                 {
                     return;
                 }
 
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&record.intervals, feature.start, feature.end)
-                        + crate::alignment::total_overlap(
-                            &mate.intervals,
-                            feature.start,
-                            feature.end,
-                        )
+                let overlap_len = if needs_overlap {
+                    let ol = crate::alignment::total_overlap(
+                        &record.intervals,
+                        feature.start,
+                        feature.end,
+                    ) + crate::alignment::total_overlap(
+                        &mate.intervals,
+                        feature.start,
+                        feature.end,
+                    );
+                    if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                        return;
+                    }
+                    ol
                 } else {
                     1
                 };
-
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
 
                 counter.hit_buffer.push(overlap::FeatureHit {
                     feature_idx: feat_idx,
@@ -1045,11 +741,14 @@ fn process_minimal_fragment(
 
     // Hits from mate (if on same chromosome)
     if mate.chrom_id == chrom_id {
-        // Build set of already-seen features for O(1) duplicate check (reusing allocated set)
-        counter.seen_features.clear();
-        counter
-            .seen_features
-            .extend(counter.hit_buffer.iter().map(|h| h.feature_idx));
+        // For dedup of features already counted from the record's intervals,
+        // linear-scan the existing hit_buffer instead of (re)building an
+        // FxHashSet. Typical RNA-seq fragments have 0–3 hits per mate, where
+        // the scan is 0–3 cmps — cheaper than the hash + bucket lookup and
+        // avoids the per-fragment clear/extend on counter.seen_features.
+        // Snapshot the length BEFORE pushing mate hits so we only scan the
+        // record's contributions.
+        let initial_hit_count = counter.hit_buffer.len();
 
         for interval in &mate.intervals {
             annotation.query_overlapping(
@@ -1057,24 +756,26 @@ fn process_minimal_fragment(
                 interval.start,
                 interval.end,
                 |feat_idx, feature| {
-                    // Skip if already counted - O(1) lookup
-                    if counter.seen_features.contains(&feat_idx) {
+                    // Skip if already counted from the record side.
+                    if counter.hit_buffer[..initial_hit_count]
+                        .iter()
+                        .any(|h| h.feature_idx == feat_idx)
+                    {
                         return;
                     }
 
                     if !is_unstranded
-                        && !overlap::check_strand_paired_with_strands(
-                            record_strand,
-                            mate_strand,
-                            feature,
-                            args,
+                        && !overlap::check_strand_paired_precomputed(
+                            expected_record,
+                            expected_mate,
+                            feature.strand,
                         )
                     {
                         return;
                     }
 
-                    let overlap_len = if args.need_overlap_length() {
-                        crate::alignment::total_overlap(
+                    let overlap_len = if needs_overlap {
+                        let ol = crate::alignment::total_overlap(
                             &record.intervals,
                             feature.start,
                             feature.end,
@@ -1082,14 +783,14 @@ fn process_minimal_fragment(
                             &mate.intervals,
                             feature.start,
                             feature.end,
-                        )
+                        );
+                        if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                            return;
+                        }
+                        ol
                     } else {
                         1
                     };
-
-                    if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                        return;
-                    }
 
                     counter.hit_buffer.push(overlap::FeatureHit {
                         feature_idx: feat_idx,
@@ -1234,7 +935,7 @@ pub fn count_reads_parallel_paired(
             .progress_chars("#>-"),
     );
 
-    let results: Vec<Result<(Vec<i64>, ReadCounters, counter::TimingStats)>> = args
+    let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
         .par_iter()
         .map(|bam_input| {
@@ -1253,7 +954,7 @@ pub fn count_reads_parallel_paired(
     let mut stats_per_sample = Vec::with_capacity(args.bam_files.len());
 
     for result in results {
-        let (counts, stats, _timing) = result?;
+        let (counts, stats) = result?;
         counts_per_sample.push(counts);
         stats_per_sample.push(stats);
     }

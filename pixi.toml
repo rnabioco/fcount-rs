@@ -6,3 +6,23 @@ platforms = ["linux-64"]
 [dependencies]
 subread = "*"
 samtools = "*"
+
+# Dev toolchain: faster linking via mold + cargo-nextest test runner.
+# Activate with `pixi shell -e dev` or `pixi run -e dev <task>`. The wrapper
+# tasks invoke `mold -run cargo ...`, which intercepts the linker exec via
+# LD_PRELOAD and works with the system gcc — no `-fuse-ld=mold` needed.
+[feature.dev.dependencies]
+mold = ">=2.4"
+cargo-nextest = ">=0.9"
+
+[feature.dev.tasks]
+build = "mold -run cargo build"
+build-rel = "mold -run cargo build --release"
+# nextest does not run doctests; use the test-doc task for those.
+test = "mold -run cargo nextest run"
+test-doc = "mold -run cargo test --doc"
+check = "mold -run cargo check"
+clippy = "mold -run cargo clippy --all-targets"
+
+[environments]
+dev = { features = ["dev"], solve-group = "default" }

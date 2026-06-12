@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::Result;
 use clap::Parser;
 use log::info;
@@ -12,13 +10,10 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-mod alignment;
-mod annotation;
-mod cli;
-mod counting;
-mod output;
-
-use cli::{Args, OutputFormat};
+// Consume the library crate rather than re-declaring every module, so the
+// codebase compiles once (not once as lib + once as bin).
+use fcount_rs::{annotation, counting, output};
+use fcount_rs::cli::{Args, OutputFormat};
 
 /// Detect if BAM file contains paired-end reads by checking first record
 fn detect_paired_end(bam_path: &std::path::Path) -> Result<bool> {
@@ -94,27 +89,23 @@ fn main() -> Result<()> {
         gtf_elapsed.as_secs_f64()
     );
 
-    // Process BAM files and count
-    // Use parallel processing when multiple threads are available
+    // Process BAM files and count. A single shared pipeline handles every
+    // thread count: threads_per_file_for() collapses to 1 worker at -t 1.
     let bam_start = Instant::now();
     let num_files = args.bam_files.len();
     let threads_per_file = counting::threads_per_file_for(args.threads, num_files);
-    let counts = if args.threads > 1 {
-        if args.paired_end {
-            info!(
-                "Processing {} BAM files in paired-end mode ({} threads, {} per file)",
-                num_files, args.threads, threads_per_file
-            );
-            counting::count_reads_parallel_paired(&args, &annotation)?
-        } else {
-            info!(
-                "Processing {} BAM files in single-end mode ({} threads, {} per file)",
-                num_files, args.threads, threads_per_file
-            );
-            counting::count_reads_parallel(&args, &annotation)?
-        }
+    let counts = if args.paired_end {
+        info!(
+            "Processing {} BAM files in paired-end mode ({} threads, {} per file)",
+            num_files, args.threads, threads_per_file
+        );
+        counting::count_reads_parallel_paired(&args, &annotation)?
     } else {
-        counting::count_reads(&args, &annotation)?
+        info!(
+            "Processing {} BAM files in single-end mode ({} threads, {} per file)",
+            num_files, args.threads, threads_per_file
+        );
+        counting::count_reads_parallel(&args, &annotation)?
     };
     let bam_elapsed = bam_start.elapsed();
     info!(

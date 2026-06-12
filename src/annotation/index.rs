@@ -128,18 +128,6 @@ impl AnnotationIndex {
         self.chrom_to_id.get(name).copied()
     }
 
-    /// Get gene name for a gene ID
-    #[inline]
-    pub fn get_gene_name(&self, gene_id: u32) -> Option<&str> {
-        self.gene_names.get(gene_id as usize).map(|s| s.as_ref())
-    }
-
-    /// Get feature by index
-    #[inline]
-    pub fn get_feature(&self, idx: u32) -> Option<&Feature> {
-        self.features.get(idx as usize)
-    }
-
     /// Find all features overlapping the given interval on a chromosome
     /// Uses callback-based API for efficiency (avoids allocations)
     #[inline]
@@ -156,22 +144,6 @@ impl AnnotationIndex {
         }
     }
 
-    /// Find all features overlapping the given interval (iterator version)
-    /// Note: This allocates a Vec internally. Prefer query_overlapping for hot paths.
-    pub fn find_overlapping(
-        &self,
-        chrom_id: u16,
-        start: u32,
-        end: u32,
-    ) -> impl Iterator<Item = (u32, &Feature)> + '_ {
-        let mut results = Vec::new();
-        self.query_overlapping(chrom_id, start, end, |idx, feat| {
-            results.push((idx, feat as *const Feature));
-        });
-        results
-            .into_iter()
-            .map(|(idx, ptr)| (idx, unsafe { &*ptr }))
-    }
 }
 
 #[cfg(test)]
@@ -222,25 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_overlapping() {
-        let index = make_test_index();
-
-        // Query that overlaps first feature
-        let hits: Vec<_> = index.find_overlapping(0, 150, 180).collect();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].1.start, 100);
-        assert_eq!(hits[0].1.end, 200);
-
-        // Query that overlaps no features
-        let hits: Vec<_> = index.find_overlapping(0, 210, 290).collect();
-        assert_eq!(hits.len(), 0);
-
-        // Query that overlaps two features
-        let hits: Vec<_> = index.find_overlapping(0, 180, 320).collect();
-        assert_eq!(hits.len(), 2);
-    }
-
-    #[test]
     fn test_query_overlapping() {
         let index = make_test_index();
 
@@ -249,13 +202,5 @@ mod tests {
             count += 1;
         });
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn test_get_gene_name() {
-        let index = make_test_index();
-        assert_eq!(index.get_gene_name(0), Some("GENE1"));
-        assert_eq!(index.get_gene_name(1), Some("GENE2"));
-        assert_eq!(index.get_gene_name(99), None);
     }
 }

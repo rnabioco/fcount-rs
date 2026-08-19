@@ -12,10 +12,18 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 // Consume the library crate rather than re-declaring every module, so the
 // codebase compiles once (not once as lib + once as bin).
-use fcount_rs::{annotation, counting, output};
 use fcount_rs::cli::{Args, OutputFormat};
+use fcount_rs::{annotation, counting, output};
 
-/// Detect if BAM file contains paired-end reads by checking first record
+/// Number of leading records inspected when auto-detecting paired-end input.
+///
+/// Checking only the first record — as this used to — silently ran the whole
+/// file single-end whenever that one record happened to be unpaired, which also
+/// makes detection depend on sort order. Any segmented record in the prefix is
+/// decisive, so this scans until it finds one.
+const PAIRED_DETECT_RECORDS: usize = 1000;
+
+/// Detect whether a BAM contains paired-end reads by sampling its first records.
 fn detect_paired_end(bam_path: &std::path::Path) -> Result<bool> {
     use noodles_bam as bam;
     use noodles_sam::alignment::record::Flags;
@@ -24,15 +32,14 @@ fn detect_paired_end(bam_path: &std::path::Path) -> Result<bool> {
     let mut reader = File::open(bam_path).map(bam::io::Reader::new)?;
     let _header = reader.read_header()?;
 
-    // Read first record
-    if let Some(result) = reader.records().next() {
+    for result in reader.records().take(PAIRED_DETECT_RECORDS) {
         let record: bam::Record = result?;
-        let flags = record.flags();
-        // Check if PAIRED flag is set
-        return Ok(flags.contains(Flags::SEGMENTED));
+        if record.flags().contains(Flags::SEGMENTED) {
+            return Ok(true);
+        }
     }
 
-    // No records found
+    // No segmented record in the sampled prefix (or no records at all).
     Ok(false)
 }
 

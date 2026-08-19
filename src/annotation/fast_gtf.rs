@@ -331,7 +331,14 @@ pub fn load_gtf_fast(args: &Args, feature_type_override: Option<&str>) -> Result
 
     let chunk_results: Vec<ChunkResult> = bounds
         .par_iter()
-        .map(|&(s, e)| parse_chunk(&data[s..e], feature_type, gtf_attr.as_bytes(), gff3_attr.as_bytes()))
+        .map(|&(s, e)| {
+            parse_chunk(
+                &data[s..e],
+                feature_type,
+                gtf_attr.as_bytes(),
+                gff3_attr.as_bytes(),
+            )
+        })
         .collect();
 
     // Merge chunk-local IDs into global IDs. We accumulate byte-slice keys to

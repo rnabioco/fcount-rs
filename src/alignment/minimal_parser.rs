@@ -42,7 +42,7 @@ pub struct MinimalRecord {
     /// Genomic intervals from CIGAR
     pub intervals: SmallVec<[Interval; 8]>,
     /// NH tag value (number of alignments, 1 if not present)
-    pub nh: u8,
+    pub nh: u16,
     /// Mate reference ID (for paired-end chimeric check)
     pub mate_ref_id: i32,
     /// FxHash of the read name (for paired-end mate matching).
@@ -152,7 +152,9 @@ pub fn parse_bam_record(
 
     record.clear();
 
-    let hdr: &[u8; 32] = data[..32].try_into().expect("data.len() ≥ 33 checked above");
+    let hdr: &[u8; 32] = data[..32]
+        .try_into()
+        .expect("data.len() ≥ 33 checked above");
 
     record.ref_id = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
     record.pos = i32::from_le_bytes(hdr[4..8].try_into().unwrap());
@@ -293,7 +295,7 @@ fn parse_cigar_ops(cigar_data: &[u8], start_pos: i32, out: &mut SmallVec<[Interv
 /// Aux data format: TAG (2 bytes) + TYPE (1 byte) + VALUE
 /// NH tag is 'N' 'H' with integer type
 #[inline]
-fn find_nh_tag(aux_data: &[u8]) -> Option<u8> {
+fn find_nh_tag(aux_data: &[u8]) -> Option<u16> {
     let mut offset = 0;
 
     while offset + 3 <= aux_data.len() {
@@ -315,12 +317,16 @@ fn find_nh_tag(aux_data: &[u8]) -> Option<u8> {
             b'i' | b'I' => 4, // int32
             b'f' => 4,        // float
             b'Z' | b'H' => {
-                // string or hex
-                let start = offset;
-                while offset < aux_data.len() && aux_data[offset] != 0 {
-                    offset += 1;
+                // NUL-terminated string or hex. Scan with a *local* cursor: this
+                // arm's value is added to `offset` by the caller, so advancing
+                // `offset` in here too would skip the value twice and land the
+                // walk mid-tag. That silently lost every NH tag written after a
+                // Z-type tag (e.g. HISAT2's MD:Z, or an added RG:Z).
+                let mut end = offset;
+                while end < aux_data.len() && aux_data[end] != 0 {
+                    end += 1;
                 }
-                offset - start + 1 // Include null terminator
+                end - offset + 1 // Include null terminator
             }
             b'B' => {
                 // array
@@ -349,22 +355,25 @@ fn find_nh_tag(aux_data: &[u8]) -> Option<u8> {
     None
 }
 
-/// Parse integer value from aux tag
+/// Parse integer value from aux tag.
+///
+/// Widened through `i64` and clamped rather than cast straight to the return
+/// type: NH is a count, and truncating it corrupts results silently. `NH:i:300`
+/// used to wrap to 44 (giving the read ~7× its correct fractional weight), and
+/// `NH:i:256` wrapped to 0, which then divided by zero in `calculate_count`.
+/// Clamping the low end at 1 also absorbs a malformed `NH:i:0`.
 #[inline]
-fn parse_int_tag(data: &[u8], val_type: u8) -> Option<u8> {
-    match val_type {
-        b'c' if !data.is_empty() => Some(data[0] as i8 as u8),
-        b'C' if !data.is_empty() => Some(data[0]),
-        b's' if data.len() >= 2 => Some(i16::from_le_bytes([data[0], data[1]]) as u8),
-        b'S' if data.len() >= 2 => Some(u16::from_le_bytes([data[0], data[1]]) as u8),
-        b'i' if data.len() >= 4 => {
-            Some(i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as u8)
-        }
-        b'I' if data.len() >= 4 => {
-            Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as u8)
-        }
-        _ => None,
-    }
+fn parse_int_tag(data: &[u8], val_type: u8) -> Option<u16> {
+    let raw: i64 = match val_type {
+        b'c' if !data.is_empty() => data[0] as i8 as i64,
+        b'C' if !data.is_empty() => data[0] as i64,
+        b's' if data.len() >= 2 => i16::from_le_bytes([data[0], data[1]]) as i64,
+        b'S' if data.len() >= 2 => u16::from_le_bytes([data[0], data[1]]) as i64,
+        b'i' if data.len() >= 4 => i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64,
+        b'I' if data.len() >= 4 => u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64,
+        _ => return None,
+    };
+    Some(raw.clamp(1, u16::MAX as i64) as u16)
 }
 
 /// Get the size of a BAM record from its first 4 bytes
@@ -385,6 +394,100 @@ pub fn get_record_size(block_size_bytes: &[u8]) -> usize {
 mod tests {
     use super::*;
 
+    /// Build an aux block from `(tag, type, value_bytes)` triples.
+    fn aux(tags: &[(&[u8; 2], u8, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (tag, ty, val) in tags {
+            out.extend_from_slice(*tag);
+            out.push(*ty);
+            out.extend_from_slice(val);
+        }
+        out
+    }
+
+    fn nh_i(n: i32) -> (&'static [u8; 2], u8, Vec<u8>) {
+        (b"NH", b'i', n.to_le_bytes().to_vec())
+    }
+
+    fn z_tag(tag: &'static [u8; 2], s: &str) -> (&'static [u8; 2], u8, Vec<u8>) {
+        let mut v = s.as_bytes().to_vec();
+        v.push(0); // NUL terminator
+        (tag, b'Z', v)
+    }
+
+    #[test]
+    fn test_nh_tag_alone() {
+        assert_eq!(find_nh_tag(&aux(&[nh_i(5)])), Some(5));
+    }
+
+    /// Regression: the Z/H arm used to advance the cursor *and* return the
+    /// length, so the walk double-skipped and every NH after a string tag was
+    /// lost — silently disabling multi-mapper filtering on HISAT2 output
+    /// (MD:Z precedes NH) and on anything with a read group added.
+    #[test]
+    fn test_nh_tag_after_string_tags() {
+        // MD:Z before NH — the HISAT2 layout.
+        assert_eq!(find_nh_tag(&aux(&[z_tag(b"MD", "100"), nh_i(5)])), Some(5));
+        // A shorter Z value, to catch an off-by-one that only shows at one length.
+        assert_eq!(find_nh_tag(&aux(&[z_tag(b"RG", "s1"), nh_i(3)])), Some(3));
+        // Empty Z value: just the terminator.
+        assert_eq!(find_nh_tag(&aux(&[z_tag(b"RG", ""), nh_i(7)])), Some(7));
+        // Several string tags in a row.
+        assert_eq!(
+            find_nh_tag(&aux(&[
+                z_tag(b"MD", "76"),
+                z_tag(b"RG", "sample_a"),
+                z_tag(b"SA", "chr1,100,+,50M,60,0;"),
+                nh_i(11),
+            ])),
+            Some(11)
+        );
+    }
+
+    /// The other aux types must still be skipped correctly.
+    #[test]
+    fn test_nh_tag_after_mixed_tags() {
+        let block = aux(&[
+            (b"AS", b'i', 42i32.to_le_bytes().to_vec()),
+            (b"XN", b'c', vec![3]),
+            (b"XS", b's', 7i16.to_le_bytes().to_vec()),
+            (b"XF", b'f', 1.5f32.to_le_bytes().to_vec()),
+            (b"XA", b'A', vec![b'+']),
+            // B array: 3 x int32
+            (b"ZB", b'B', {
+                let mut v = vec![b'i'];
+                v.extend_from_slice(&3u32.to_le_bytes());
+                v.extend_from_slice(&1i32.to_le_bytes());
+                v.extend_from_slice(&2i32.to_le_bytes());
+                v.extend_from_slice(&3i32.to_le_bytes());
+                v
+            }),
+            z_tag(b"MD", "76"),
+            nh_i(9),
+        ]);
+        assert_eq!(find_nh_tag(&block), Some(9));
+    }
+
+    #[test]
+    fn test_nh_tag_absent() {
+        assert_eq!(find_nh_tag(&aux(&[z_tag(b"MD", "100")])), None);
+        assert_eq!(find_nh_tag(&[]), None);
+    }
+
+    /// Regression: NH used to be parsed into a `u8`. NH:i:256 wrapped to 0 and
+    /// then divided by zero in `calculate_count`; NH:i:300 wrapped to 44.
+    #[test]
+    fn test_nh_tag_large_values_do_not_wrap() {
+        assert_eq!(find_nh_tag(&aux(&[nh_i(255)])), Some(255));
+        assert_eq!(find_nh_tag(&aux(&[nh_i(256)])), Some(256));
+        assert_eq!(find_nh_tag(&aux(&[nh_i(300)])), Some(300));
+        assert_eq!(find_nh_tag(&aux(&[nh_i(70_000)])), Some(u16::MAX));
+        // Malformed non-positive NH clamps to 1 rather than producing a zero
+        // divisor downstream.
+        assert_eq!(find_nh_tag(&aux(&[nh_i(0)])), Some(1));
+        assert_eq!(find_nh_tag(&aux(&[nh_i(-4)])), Some(1));
+    }
+
     #[test]
     fn test_cigar_parsing() {
         // Test simple match: 100M
@@ -398,13 +501,19 @@ mod tests {
         assert_eq!(intervals[0].end, 1099);
     }
 
+    /// Encode one CIGAR op the way BAM stores it: length in the upper 28 bits,
+    /// opcode in the low 4.
+    fn cigar_op(len: u32, op: u8) -> [u8; 4] {
+        ((len << 4) | op as u32).to_le_bytes()
+    }
+
     #[test]
     fn test_cigar_with_intron() {
         // Test 50M100N50M
         let mut cigar_data = Vec::new();
-        cigar_data.extend_from_slice(&((50u32 << 4) | 0).to_le_bytes()); // 50M
-        cigar_data.extend_from_slice(&((100u32 << 4) | 3).to_le_bytes()); // 100N
-        cigar_data.extend_from_slice(&((50u32 << 4) | 0).to_le_bytes()); // 50M
+        cigar_data.extend_from_slice(&cigar_op(50, CIGAR_M));
+        cigar_data.extend_from_slice(&cigar_op(100, CIGAR_N));
+        cigar_data.extend_from_slice(&cigar_op(50, CIGAR_M));
 
         let mut intervals = SmallVec::new();
         parse_cigar_ops(&cigar_data, 999, &mut intervals);

@@ -11,7 +11,13 @@ pub struct ReadCounters {
     pub unassigned_mapping_quality: u64,
     /// Mates on different chromosomes
     pub unassigned_chimeric: u64,
-    /// Fragment length outside range
+    /// Fragment length outside range.
+    ///
+    /// Always 0: fcount has no equivalent of featureCounts' `-d`/`-D` fragment
+    /// length filters, so nothing can reject a read on this basis. The field and
+    /// its summary row exist only to keep the summary column-compatible with
+    /// featureCounts, which likewise reports 0 when those options are unused.
+    /// Wire this up if `-d`/`-D` are ever implemented.
     pub unassigned_fragment_length: u64,
     /// Duplicate reads (FLAG 0x400 with --ignore-dup)
     pub unassigned_duplicate: u64,

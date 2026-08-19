@@ -22,7 +22,7 @@ pub struct DeferredRead {
     /// SAM flags
     pub flags: u16,
     /// NH tag value
-    pub nh: u8,
+    pub nh: u16,
 }
 
 impl DeferredRead {
@@ -64,11 +64,7 @@ impl ShardedMateTracker {
     /// the lock across the closure is acceptable because the construction is
     /// pure data assembly (no I/O, no further locking).
     #[inline]
-    pub fn take_or_insert_with<F>(
-        &self,
-        name_hash: u64,
-        make_read: F,
-    ) -> Option<DeferredRead>
+    pub fn take_or_insert_with<F>(&self, name_hash: u64, make_read: F) -> Option<DeferredRead>
     where
         F: FnOnce() -> DeferredRead,
     {
@@ -134,8 +130,16 @@ mod tests {
     fn test_different_reads() {
         let tracker = ShardedMateTracker::new(4);
 
-        assert!(tracker.take_or_insert_with(1, || make_read(0, 0x41)).is_none());
-        assert!(tracker.take_or_insert_with(2, || make_read(0, 0x41)).is_none());
+        assert!(
+            tracker
+                .take_or_insert_with(1, || make_read(0, 0x41))
+                .is_none()
+        );
+        assert!(
+            tracker
+                .take_or_insert_with(2, || make_read(0, 0x41))
+                .is_none()
+        );
 
         // Two distinct hashes both remain pending.
         assert_eq!(tracker.drain_all().len(), 2);

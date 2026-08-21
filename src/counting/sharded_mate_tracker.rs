@@ -45,13 +45,18 @@ impl ShardedMateTracker {
     /// Create a new mate tracker.
     ///
     /// # Arguments
-    /// * `num_shards` - Number of shards for the DashMap (minimum 16)
+    /// * `num_shards` - Requested number of shards. Clamped to a minimum of 16
+    ///   and rounded up to the next power of two, because DashMap requires the
+    ///   shard count to be a power of two and panics otherwise.
     pub fn new(num_shards: usize) -> Self {
+        // DashMap asserts `shard_amount.is_power_of_two()`; guarantee it here so
+        // no caller can trip the panic with an awkward worker count.
+        let shard_amount = num_shards.max(16).next_power_of_two();
         ShardedMateTracker {
             map: DashMap::with_capacity_and_hasher_and_shard_amount(
                 100_000,
                 BuildHasherDefault::<FxHasher>::default(),
-                num_shards.max(16),
+                shard_amount,
             ),
         }
     }
@@ -169,5 +174,17 @@ mod tests {
 
         // All 400 distinct hashes should be pending (no mates matched).
         assert_eq!(tracker.drain_all().len(), 400);
+    }
+
+    #[test]
+    fn new_does_not_panic_on_non_power_of_two_shard_request() {
+        // 24 is what `mate_tracker_shards(3)` produced before the fix; DashMap
+        // panics on a non-power-of-two shard count, so the constructor must
+        // round it up rather than pass it through.
+        for req in [0usize, 3, 17, 18, 24, 48, 100] {
+            let tracker = ShardedMateTracker::new(req);
+            // Sanity: the map is usable.
+            assert!(tracker.take_or_insert_with(1, || make_read(0, 0x41)).is_none());
+        }
     }
 }

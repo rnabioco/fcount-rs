@@ -43,6 +43,27 @@ impl CountResult {
     }
 }
 
+/// Build the per-file progress bar.
+///
+/// Honors `--quiet`: the bar draws to stderr, so leaving it enabled made the
+/// flag's promise to "suppress progress output" false. The template carries no
+/// `{msg}` placeholder, so callers deliberately don't set one.
+fn new_progress_bar(num_files: usize, quiet: bool) -> ProgressBar {
+    if quiet {
+        return ProgressBar::hidden();
+    }
+    let pb = ProgressBar::new(num_files as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} BAM files ({eta})",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    pb
+}
+
 /// Process a single BAM file using parallel producer-consumer pattern
 /// Uses crossbeam scoped threads for safe borrowing
 fn process_bam_parallel(
@@ -255,14 +276,7 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
     let num_files = args.bam_files.len();
     let tpf = threads_per_file_for(args.threads, num_files);
 
-    // Create progress bar
-    let pb = ProgressBar::new(num_files as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} BAM files ({eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    let pb = new_progress_bar(num_files, args.quiet);
 
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
@@ -270,7 +284,6 @@ pub fn count_reads_parallel(args: &Args, annotation: &AnnotationIndex) -> Result
         .map(|bam_input| {
             let result = process_bam_parallel(&bam_input.path, args, annotation, count_size, tpf);
             pb.inc(1);
-            pb.set_message(bam_input.display_name());
             result
         })
         .collect();
@@ -403,18 +416,18 @@ fn process_bam_parallel_paired(
             debug!("{} orphan mates remaining after processing", orphans.len());
             // These are singletons - we could count them if require_both_aligned is false
             if !args.require_both_aligned {
-                // Process orphans as single-end reads (reuse hit_buffer)
-                let mut hit_buffer: Vec<overlap::FeatureHit> = Vec::with_capacity(8);
+                // Count orphans as single-end reads through the same
+                // ThreadCounter the workers use, then merge like any worker's
+                // result — so NH weighting and stats stay identical by
+                // construction rather than by two copies agreeing.
+                let mut orphan_counter = ThreadCounter::new(count_size, args);
                 for (_hash, deferred) in orphans {
-                    process_deferred_as_single(
-                        &deferred,
-                        &mut final_counts,
-                        &mut final_stats,
-                        annotation,
-                        args,
-                        &mut hit_buffer,
-                    );
+                    process_deferred_as_single(&deferred, &mut orphan_counter, annotation, args);
                 }
+                for (slot, count) in final_counts.iter_mut().zip(&orphan_counter.counts) {
+                    *slot += count;
+                }
+                final_stats.merge(&orphan_counter.stats);
             } else {
                 final_stats.unassigned_singleton += orphans.len() as u64;
             }
@@ -546,13 +559,12 @@ fn process_paired_batch(
         // Only resolve the mate chrom when the chimeric filter is actually on;
         // otherwise the lookup is pure waste.
         if no_chimeric {
-            let mate_chrom_id = if record.mate_ref_id >= 0
-                && (record.mate_ref_id as usize) < ref_to_chrom.len()
-            {
-                ref_to_chrom[record.mate_ref_id as usize]
-            } else {
-                None
-            };
+            let mate_chrom_id =
+                if record.mate_ref_id >= 0 && (record.mate_ref_id as usize) < ref_to_chrom.len() {
+                    ref_to_chrom[record.mate_ref_id as usize]
+                } else {
+                    None
+                };
 
             // Only mark as chimeric if both chromosomes are in annotation AND
             // different. If mate_chrom_id is None, mate is on a chromosome not
@@ -590,11 +602,38 @@ fn process_minimal_single_read(
     args: &Args,
     annotation: &AnnotationIndex,
 ) {
+    count_single_end(
+        &record.intervals,
+        chrom_id,
+        record.is_reverse(),
+        record.nh,
+        counter,
+        args,
+        annotation,
+    );
+}
+
+/// Count one read's worth of intervals as a single-end read.
+///
+/// Shared by the single-end path, by paired records whose mate is unmapped, and
+/// by orphan mates left over after a paired run — all three used to carry their
+/// own copy of this loop, and the orphan copy had drifted (it ignored NH under
+/// `--fraction`). Taking `intervals` + `is_reverse` + `nh` rather than a record
+/// type is what lets `DeferredRead` and `MinimalRecord` share it.
+fn count_single_end(
+    intervals: &[crate::alignment::Interval],
+    chrom_id: u16,
+    is_reverse: bool,
+    nh: u16,
+    counter: &mut ThreadCounter,
+    args: &Args,
+    annotation: &AnnotationIndex,
+) {
     use crate::cli::StrandMode;
 
     // Precompute read_len once (only needed if min_overlap_fraction > 0)
     let read_len: u32 = if args.min_overlap_fraction > 0.0 {
-        record.intervals.iter().map(|i| i.len()).sum()
+        intervals.iter().map(|i| i.len()).sum()
     } else {
         0
     };
@@ -603,7 +642,7 @@ fn process_minimal_single_read(
     let expected_strand = match args.strand_mode() {
         StrandMode::Unstranded => None,
         mode => Some(overlap::apply_strand_mode(
-            overlap::strand_from_reverse(record.is_reverse()),
+            overlap::strand_from_reverse(is_reverse),
             mode,
         )),
     };
@@ -612,8 +651,12 @@ fn process_minimal_single_read(
     let needs_overlap = args.need_overlap_length();
 
     counter.hit_buffer.clear();
+    // Set when a feature overlapped but fell short of the overlap thresholds, so
+    // a read that ends up with no hits can be reported as Overlapping_Length
+    // rather than NoFeatures.
+    let mut overlap_rejected = false;
 
-    for interval in &record.intervals {
+    for interval in intervals {
         // Use callback-based query to avoid allocation
         annotation.query_overlapping(
             chrom_id,
@@ -628,12 +671,9 @@ fn process_minimal_single_read(
                 // at its no-op default, so the threshold check trivially passes
                 // with overlap_len=1 — skip the call entirely.
                 let overlap_len = if needs_overlap {
-                    let ol = crate::alignment::total_overlap(
-                        &record.intervals,
-                        feature.start,
-                        feature.end,
-                    );
+                    let ol = crate::alignment::total_overlap(intervals, feature.start, feature.end);
                     if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                        overlap_rejected = true;
                         return;
                     }
                     ol
@@ -651,7 +691,7 @@ fn process_minimal_single_read(
     }
 
     let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
-    counter.apply_assignment(assignment, record.nh, args);
+    counter.apply_assignment(assignment, nh, args, overlap_rejected);
 }
 
 /// Process a fragment (both mates found) from MinimalRecord
@@ -682,7 +722,10 @@ fn process_minimal_fragment(
     // In unstranded mode these are unused, so set them to Unknown — the
     // callback gates the precomputed check on `!is_unstranded` anyway.
     let (expected_record, expected_mate) = if is_unstranded {
-        (crate::annotation::Strand::Unknown, crate::annotation::Strand::Unknown)
+        (
+            crate::annotation::Strand::Unknown,
+            crate::annotation::Strand::Unknown,
+        )
     } else {
         let record_strand = overlap::strand_from_reverse(record.is_reverse());
         let mate_strand = overlap::strand_from_reverse(mate.is_reverse_strand());
@@ -694,6 +737,11 @@ fn process_minimal_fragment(
 
     // Hoist out of the per-feature callback — answer is constant per fragment.
     let needs_overlap = args.need_overlap_length();
+
+    // Set when a feature overlapped but fell short of the overlap thresholds, so
+    // a fragment that ends up with no hits can be reported as Overlapping_Length
+    // rather than NoFeatures.
+    let mut overlap_rejected = false;
 
     // Hits from current record - use callback-based query
     for interval in &record.intervals {
@@ -723,6 +771,7 @@ fn process_minimal_fragment(
                         feature.end,
                     );
                     if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                        overlap_rejected = true;
                         return;
                     }
                     ol
@@ -785,6 +834,7 @@ fn process_minimal_fragment(
                             feature.end,
                         );
                         if !overlap::check_overlap_thresholds(ol, read_len, feature, args) {
+                            overlap_rejected = true;
                             return;
                         }
                         ol
@@ -803,110 +853,30 @@ fn process_minimal_fragment(
     }
 
     let assignment = overlap::resolve_assignment(&counter.hit_buffer, args);
-    counter.apply_assignment(assignment, record.nh.max(mate.nh), args);
+    counter.apply_assignment(assignment, record.nh.max(mate.nh), args, overlap_rejected);
 }
 
-/// Process a deferred read as single-end (for orphan handling)
+/// Process a leftover unpaired mate as a single-end read.
+///
+/// Thin adapter over [`count_single_end`] — this used to be a fourth copy of the
+/// hit-collection loop *plus* a hand-rolled reimplementation of
+/// `ThreadCounter::apply_assignment` that omitted the NH divisor, so orphans got
+/// full weight under `--fraction` while properly paired multi-mappers got 1/NH.
 fn process_deferred_as_single(
     deferred: &DeferredRead,
-    counts: &mut [i64],
-    stats: &mut ReadCounters,
+    counter: &mut ThreadCounter,
     annotation: &AnnotationIndex,
     args: &Args,
-    hit_buffer: &mut Vec<overlap::FeatureHit>,
 ) {
-    use crate::cli::StrandMode;
-
-    hit_buffer.clear();
-
-    // Precompute read_len once (only needed if min_overlap_fraction > 0)
-    let read_len: u32 = if args.min_overlap_fraction > 0.0 {
-        deferred.intervals.iter().map(|i| i.len()).sum()
-    } else {
-        0
-    };
-
-    // Precompute expected strand once
-    let expected_strand = match args.strand_mode() {
-        StrandMode::Unstranded => None,
-        mode => Some(overlap::apply_strand_mode(
-            overlap::strand_from_reverse(deferred.is_reverse_strand()),
-            mode,
-        )),
-    };
-
-    for interval in &deferred.intervals {
-        annotation.query_overlapping(
-            deferred.chrom_id,
-            interval.start,
-            interval.end,
-            |feat_idx, feature| {
-                if !overlap::check_strand_fast(expected_strand, feature.strand) {
-                    return;
-                }
-
-                let overlap_len = if args.need_overlap_length() {
-                    crate::alignment::total_overlap(&deferred.intervals, feature.start, feature.end)
-                } else {
-                    1
-                };
-
-                if !overlap::check_overlap_thresholds(overlap_len, read_len, feature, args) {
-                    return;
-                }
-
-                hit_buffer.push(overlap::FeatureHit {
-                    feature_idx: feat_idx,
-                    gene_id: feature.gene_id,
-                    overlap_len,
-                });
-            },
-        );
-    }
-
-    let assignment = overlap::resolve_assignment(hit_buffer, args);
-
-    // Apply assignment directly to counts/stats
-    // Use same counting as ThreadCounter (1 for non-fractional, FRACTION_MULTIPLIER for fractional)
-    let count_value = if args.fractional_counting {
-        FRACTION_MULTIPLIER
-    } else {
-        1
-    };
-
-    match assignment {
-        overlap::Assignment::Unique(hit) => {
-            let id = if args.feature_level {
-                hit.feature_idx as usize
-            } else {
-                hit.gene_id as usize
-            };
-            counts[id] += count_value;
-            stats.assigned += 1;
-        }
-        overlap::Assignment::Ambiguous => {
-            stats.unassigned_ambiguous += 1;
-        }
-        overlap::Assignment::NoFeature => {
-            stats.unassigned_no_features += 1;
-        }
-        overlap::Assignment::MultiOverlap(hits) => {
-            if args.allow_multi_overlap {
-                let frac = count_value / hits.len() as i64;
-                for hit in hits {
-                    let id = if args.feature_level {
-                        hit.feature_idx as usize
-                    } else {
-                        hit.gene_id as usize
-                    };
-                    counts[id] += frac;
-                }
-                stats.assigned += 1;
-            } else {
-                stats.unassigned_ambiguous += 1;
-            }
-        }
-    }
+    count_single_end(
+        &deferred.intervals,
+        deferred.chrom_id,
+        deferred.is_reverse_strand(),
+        deferred.nh,
+        counter,
+        args,
+        annotation,
+    );
 }
 
 /// Count reads using parallel processing for paired-end mode
@@ -926,14 +896,7 @@ pub fn count_reads_parallel_paired(
     let num_files = args.bam_files.len();
     let tpf = threads_per_file_for(args.threads, num_files);
 
-    // Create progress bar
-    let pb = ProgressBar::new(num_files as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} BAM files ({eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    let pb = new_progress_bar(num_files, args.quiet);
 
     let results: Vec<Result<(Vec<i64>, ReadCounters)>> = args
         .bam_files
@@ -942,7 +905,6 @@ pub fn count_reads_parallel_paired(
             let result =
                 process_bam_parallel_paired(&bam_input.path, args, annotation, count_size, tpf);
             pb.inc(1);
-            pb.set_message(bam_input.display_name());
             result
         })
         .collect();
@@ -974,4 +936,24 @@ pub fn count_reads_parallel_paired(
         counts_per_sample,
         stats_per_sample,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--quiet` must hide the progress bar.
+    ///
+    /// Checking this through redirected stderr doesn't work: indicatif already
+    /// self-suppresses when stderr is not a terminal, so the bug only showed
+    /// interactively — and for the same reason the non-quiet bar also reports
+    /// hidden under a test harness, which is why only the quiet case is
+    /// asserted here.
+    #[test]
+    fn test_progress_bar_hidden_when_quiet() {
+        assert!(
+            new_progress_bar(4, true).is_hidden(),
+            "--quiet must suppress the progress bar"
+        );
+    }
 }

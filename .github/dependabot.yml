@@ -1,0 +1,50 @@
+# Dependabot keeps Cargo crates and GitHub Actions pinned versions current.
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates
+version: 2
+
+updates:
+  # Rust crate dependencies
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "deps"
+      include: scope
+    groups:
+      # The noodles-* crates share a release train and their versions are
+      # coupled (noodles-bam depends on matching noodles-sam/bgzf), so bump
+      # them together or the lockfile resolves to duplicate copies.
+      noodles:
+        patterns:
+          - "noodles-*"
+      # Low-risk semver-compatible bumps land as one PR to cut review churn.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - "noodles-*"
+
+  # Pinned action versions in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"

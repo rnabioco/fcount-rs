@@ -151,6 +151,23 @@ pub fn check_overlap_thresholds(
     true
 }
 
+/// The identifier a hit is counted against: the feature itself under
+/// `--feature-level`, otherwise its gene.
+///
+/// Every grouping decision below keys on this rather than on `gene_id`. Keying
+/// on the gene unconditionally — as this used to — meant that at feature level
+/// two exons of one gene collapsed to a single hit, so a read spanning both
+/// credited only the first even when `--multi-overlap` asked for both. That
+/// lands squarely on the DEXSeq output, which forces `--feature-level` on.
+#[inline(always)]
+fn target_id(hit: &FeatureHit, feature_level: bool) -> u32 {
+    if feature_level {
+        hit.feature_idx
+    } else {
+        hit.gene_id
+    }
+}
+
 /// Resolve assignment from a list of feature hits
 /// Optimized to avoid allocations for common cases (1-4 hits)
 pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
@@ -162,32 +179,37 @@ pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
         return Assignment::Unique(hits[0]); // Copy, not clone
     }
 
-    // Quick check: are all hits from the same gene? (common case)
-    let first_gene = hits[0].gene_id;
-    let all_same_gene = hits.iter().skip(1).all(|h| h.gene_id == first_gene);
+    let feature_level = args.feature_level;
 
-    if all_same_gene {
-        // All hits are from the same gene - pick the one with best overlap
+    // Quick check: do all hits resolve to the same target? (common case)
+    let first_target = target_id(&hits[0], feature_level);
+    let all_same_target = hits
+        .iter()
+        .skip(1)
+        .all(|h| target_id(h, feature_level) == first_target);
+
+    if all_same_target {
+        // All hits are the same target - pick the one with best overlap
         if args.largest_overlap_only {
             let best = hits.iter().max_by_key(|h| h.overlap_len).unwrap();
             return Assignment::Unique(*best); // Copy, not clone
         }
-        // Multiple exons of same gene - count as unique to that gene
+        // e.g. multiple exons of the same gene at gene level - count once
         return Assignment::Unique(hits[0]); // Copy, not clone
     }
 
-    // Multiple genes
+    // Multiple distinct targets
     if args.allow_multi_overlap {
         if args.largest_overlap_only {
-            // Find the gene(s) with largest overlap - single pass
+            // Find the target(s) with largest overlap - single pass
             let max_overlap = hits.iter().map(|h| h.overlap_len).max().unwrap();
 
-            // Use FxHashSet for O(1) gene deduplication instead of O(n) contains
+            // Use FxHashSet for O(1) deduplication instead of O(n) contains
             let mut best_hits: SmallVec<[FeatureHit; 8]> = SmallVec::new();
-            let mut seen_genes: FxHashSet<u32> = FxHashSet::default();
+            let mut seen: FxHashSet<u32> = FxHashSet::default();
 
             for h in hits {
-                if h.overlap_len == max_overlap && seen_genes.insert(h.gene_id) {
+                if h.overlap_len == max_overlap && seen.insert(target_id(h, feature_level)) {
                     best_hits.push(*h); // Copy
                 }
             }
@@ -199,12 +221,12 @@ pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
             return Assignment::MultiOverlap(best_hits.into_vec());
         }
 
-        // Deduplicate by gene using FxHashSet for O(1) lookup
-        let mut seen_genes: FxHashSet<u32> = FxHashSet::default();
+        // Deduplicate by target using FxHashSet for O(1) lookup
+        let mut seen: FxHashSet<u32> = FxHashSet::default();
         let mut deduped: SmallVec<[FeatureHit; 8]> = SmallVec::new();
 
         for h in hits {
-            if seen_genes.insert(h.gene_id) {
+            if seen.insert(target_id(h, feature_level)) {
                 deduped.push(*h); // Copy
             }
         }
@@ -212,7 +234,7 @@ pub fn resolve_assignment(hits: &[FeatureHit], args: &Args) -> Assignment {
         return Assignment::MultiOverlap(deduped.into_vec());
     }
 
-    // Multiple genes without multi-overlap - ambiguous
+    // Multiple targets without multi-overlap - ambiguous
     Assignment::Ambiguous
 }
 
@@ -352,6 +374,96 @@ mod tests {
                 assert_eq!(h.overlap_len, 100);
             }
             _ => panic!("Expected unique assignment with largest overlap"),
+        }
+    }
+
+    /// Two exons of the *same* gene, which is what a spliced read spanning an
+    /// exon-exon junction produces.
+    fn two_exons_one_gene() -> Vec<FeatureHit> {
+        vec![
+            FeatureHit {
+                feature_idx: 0,
+                gene_id: 7,
+                overlap_len: 40,
+            },
+            FeatureHit {
+                feature_idx: 1,
+                gene_id: 7,
+                overlap_len: 60,
+            },
+        ]
+    }
+
+    /// At gene level these collapse to one hit on the gene — unchanged behavior.
+    #[test]
+    fn test_gene_level_collapses_exons_of_same_gene() {
+        let args = make_args(true, false); // -O, gene level
+        match resolve_assignment(&two_exons_one_gene(), &args) {
+            Assignment::Unique(h) => assert_eq!(h.gene_id, 7),
+            other => panic!("expected Unique at gene level, got {:?}", other),
+        }
+    }
+
+    /// Regression: at feature level with `-O`, both exons must be counted. The
+    /// dedup used to key on `gene_id` regardless of level, so the second exon
+    /// was dropped — silently halving per-exon counts on the DEXSeq path, which
+    /// forces `--feature-level` on.
+    #[test]
+    fn test_feature_level_multi_overlap_keeps_both_exons() {
+        let mut args = make_args(true, false); // -O
+        args.feature_level = true;
+        match resolve_assignment(&two_exons_one_gene(), &args) {
+            Assignment::MultiOverlap(hits) => {
+                assert_eq!(hits.len(), 2, "both exons should be counted");
+                let mut idx: Vec<u32> = hits.iter().map(|h| h.feature_idx).collect();
+                idx.sort_unstable();
+                assert_eq!(idx, vec![0, 1]);
+            }
+            other => panic!("expected MultiOverlap at feature level, got {:?}", other),
+        }
+    }
+
+    /// At feature level *without* `-O`, a read touching two features is
+    /// ambiguous — matching featureCounts, which only assigns to every
+    /// overlapping feature when `-O` is given.
+    #[test]
+    fn test_feature_level_without_multi_overlap_is_ambiguous() {
+        let mut args = make_args(false, false);
+        args.feature_level = true;
+        match resolve_assignment(&two_exons_one_gene(), &args) {
+            Assignment::Ambiguous => {}
+            other => panic!("expected Ambiguous, got {:?}", other),
+        }
+    }
+
+    /// `--largest-overlap` at feature level picks the single best exon rather
+    /// than collapsing on gene.
+    #[test]
+    fn test_feature_level_largest_overlap_picks_best_exon() {
+        let mut args = make_args(true, true);
+        args.feature_level = true;
+        match resolve_assignment(&two_exons_one_gene(), &args) {
+            Assignment::Unique(h) => {
+                assert_eq!(h.feature_idx, 1);
+                assert_eq!(h.overlap_len, 60);
+            }
+            other => panic!("expected Unique, got {:?}", other),
+        }
+    }
+
+    /// A single hit is still Unique at either level.
+    #[test]
+    fn test_feature_level_single_hit_unchanged() {
+        let hits = vec![FeatureHit {
+            feature_idx: 3,
+            gene_id: 7,
+            overlap_len: 10,
+        }];
+        let mut args = make_args(true, false);
+        args.feature_level = true;
+        match resolve_assignment(&hits, &args) {
+            Assignment::Unique(h) => assert_eq!(h.feature_idx, 3),
+            other => panic!("expected Unique, got {:?}", other),
         }
     }
 }

@@ -28,10 +28,15 @@ impl ChromIndex {
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                // coitrees uses i32 for coordinates (end-inclusive)
-                // GTF/BED coordinates are 1-based, end-exclusive, so subtract 1
+                // `Feature.start`/`end` come straight from GTF columns 4 and 5:
+                // 1-based and end-*inclusive* (which is why `Feature::len()` is
+                // `end - start + 1`). coitrees is also end-inclusive, so the
+                // bounds carry over as-is. Subtracting 1 here — as this used to
+                // do, under a comment claiming end-exclusive — shrank every
+                // feature by a base and silently dropped reads whose only
+                // overlap was the feature's last base.
                 let first = f.start as i32;
-                let last = (f.end - 1) as i32; // Convert to end-inclusive
+                let last = f.end as i32;
                 let feat_idx = (start_idx + i) as u32;
                 Interval::new(first, last, feat_idx)
             })
@@ -48,9 +53,10 @@ impl ChromIndex {
     where
         F: FnMut(u32),
     {
-        // Convert to end-inclusive for coitrees
+        // `start`/`end` are 1-based end-inclusive (CIGAR-derived read intervals),
+        // matching how features were stored above and coitrees' own convention.
         let first = start as i32;
-        let last = (end - 1) as i32;
+        let last = end as i32;
         self.tree
             .query(first, last, |node| callback(*node.metadata()));
     }
@@ -143,7 +149,6 @@ impl AnnotationIndex {
             });
         }
     }
-
 }
 
 #[cfg(test)]
@@ -202,5 +207,54 @@ mod tests {
             count += 1;
         });
         assert_eq!(count, 1);
+    }
+
+    /// Regression: features and queries are both 1-based end-inclusive, but the
+    /// index used to subtract 1 from each end before handing them to coitrees.
+    /// That shrank both sides by a base, so a read whose only overlap was the
+    /// feature's first or last base was dropped — while featureCounts counts it
+    /// (its default minimum overlap is one base).
+    #[test]
+    fn test_query_boundary_overlaps() {
+        // A lone feature, so every assertion below is unambiguous about *which*
+        // boundary it is probing.
+        let mut chrom_to_id = FxHashMap::default();
+        chrom_to_id.insert(Arc::from("chr1"), 0);
+        let index = AnnotationIndex::new(
+            chrom_to_id,
+            vec![Arc::from("chr1")],
+            vec![Arc::from("G1")],
+            vec![Feature {
+                gene_id: 0,
+                chrom_id: 0,
+                start: 100,
+                end: 200,
+                strand: Strand::Forward,
+            }],
+        )
+        .unwrap();
+
+        let hits = |start: u32, end: u32| {
+            let mut n = 0;
+            index.query_overlapping(0, start, end, |_, _| n += 1);
+            n
+        };
+
+        // Single-base overlaps at each boundary must be found.
+        assert_eq!(hits(50, 100), 1, "1 bp overlap at feature start");
+        assert_eq!(hits(200, 300), 1, "1 bp overlap at feature end");
+
+        // Two-base overlaps were always found; keep them pinned.
+        assert_eq!(hits(50, 101), 1);
+        assert_eq!(hits(199, 300), 1);
+
+        // Fully inside, and fully spanning.
+        assert_eq!(hits(150, 160), 1);
+        assert_eq!(hits(1, 1000), 1);
+
+        // Abutting reads genuinely do not overlap and must stay excluded —
+        // this is the half the fix could plausibly have broken.
+        assert_eq!(hits(50, 99), 0, "abuts start, no overlap");
+        assert_eq!(hits(201, 300), 0, "abuts end, no overlap");
     }
 }

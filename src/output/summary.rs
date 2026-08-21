@@ -92,7 +92,7 @@ pub fn write_summary(args: &Args, result: &CountResult) -> Result<()> {
     if !args.quiet {
         eprintln!();
         eprintln!("=== Summary ===");
-        eprintln!("{}", &stats);
+        eprintln!("{}", stats);
         eprintln!("Assignment rate: {:.1}%", stats.assignment_rate() * 100.0);
     }
 

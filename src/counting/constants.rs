@@ -19,7 +19,7 @@ pub const SOFT_THREADS_PER_FILE_CAP: usize = 8;
 /// every thread the user requested just adds OS-scheduler contention without
 /// improving throughput. At -t 8 with the old uncapped policy a single file
 /// spawned 1 producer + 8 BGZF + 8 record workers = 17 OS threads, which is
-/// >2× the user's stated budget. Capping BGZF here keeps the record-worker
+/// more than 2× the user's stated budget. Capping BGZF here keeps the record-worker
 /// count as the dominant thread consumer.
 pub const BGZF_THREADS_CAP: usize = 4;
 

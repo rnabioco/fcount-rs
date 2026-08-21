@@ -75,4 +75,4 @@ debug = true
 strip = false
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.6.1"
+tikv-jemallocator = "0.7.0"

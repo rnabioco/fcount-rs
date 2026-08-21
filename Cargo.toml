@@ -18,8 +18,8 @@ path = "src/main.rs"
 [dependencies]
 # BAM/SAM parsing (pure Rust). noodles-bam/sam are used only for paired-end
 # auto-detection in main; the hot path uses the custom block reader + parser.
-noodles-bam = "0.87"
-noodles-sam = "0.83"
+noodles-bam = "0.88"
+noodles-sam = "0.84"
 noodles-bgzf = { version = "0.46", features = ["libdeflate"] }
 
 # Parallelism
